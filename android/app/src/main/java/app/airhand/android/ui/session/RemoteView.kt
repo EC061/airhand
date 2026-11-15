@@ -325,9 +325,21 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
     private var fracX = 0f
     private var fracY = 0f
 
-    /** 发相对移动：被控端的光标隐藏了，或者打开了锁定鼠标 */
+    /**
+     * 按着键（外接鼠标的键、触摸拖动）期间被控端隐藏过光标：松开之前一直当作隐藏。有的游戏按住键转视角时
+     * 光标一闪一闪（隐藏 / 出现来回跳），跟着它改回发位置，视角会乱跳，外接鼠标也来回抓住、放开
+     */
+    private var hiddenWhilePressed = false
+
+    /** 发相对移动：被控端的光标隐藏了（按着键时见 [hiddenWhilePressed]），或者打开了锁定鼠标。按键变了也要调用 */
     private fun updateRelative() {
-        val r = interactive && (mouseLock || !cursor.visible)
+        val pressed = mouseButtons != 0 || gestures.pressing
+        val held = pressed && (hiddenWhilePressed || !cursor.visible)
+        if (held != hiddenWhilePressed) {
+            hiddenWhilePressed = held
+            overlay.invalidate()
+        }
+        val r = interactive && (mouseLock || !cursor.visible || hiddenWhilePressed)
         if (gestures.relative != r) {
             gestures.relative = r
             fracX = 0f
@@ -412,7 +424,7 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
             if (ripples.isNotEmpty()) postInvalidateOnAnimation()
 
             // 光标已经画在画面里了（对方拖动、缩放窗口等）：默认照样画（跟手），设置里关掉了就只看画面里的
-            if (!showCursor || !cursor.visible || (cursor.inFrame && !localCursor) || content.width() <= 0f) return
+            if (!showCursor || !cursor.visible || hiddenWhilePressed || (cursor.inFrame && !localCursor) || content.width() <= 0f) return
             val x = content.left + gestures.cursorX * content.width()
             val y = content.top + gestures.cursorY * content.height()
             val bmp: Bitmap? = cursor.bitmap
@@ -450,6 +462,7 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
     override fun onTouchEvent(e: MotionEvent): Boolean {
         if (!interactive) return false
         if (e.isFromSource(InputDevice.SOURCE_MOUSE)) return mouse(e)
+        val wasPressing = gestures.pressing
         val t = e.eventTime
         fun pt(i: Int) = Gestures.P(e.getPointerId(i), e.getX(i), e.getY(i))
         fun pts() = (0 until e.pointerCount).map { pt(it) }
@@ -464,6 +477,7 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
             MotionEvent.ACTION_UP -> gestures.up(pt(e.actionIndex), t)
             MotionEvent.ACTION_CANCEL -> gestures.cancel()
         }
+        if (gestures.pressing != wasPressing) updateRelative()
         return true
     }
 
@@ -525,6 +539,8 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
         }
         mouseButtons = now
         if (events.isNotEmpty()) host.onInput(events, true)
+        // 松开最后一个键（照上面的方式发出去之后）：按着键期间光标出现了的，现在改回发位置
+        if (changed != 0) updateRelative()
     }
 
     // ───────────────────────────── 键盘 ─────────────────────────────

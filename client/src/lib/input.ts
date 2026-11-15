@@ -11,7 +11,9 @@
 // * 被控端光标隐藏时按下鼠标键，或者按着键时光标隐藏了（游戏按住右键转视角）：马上锁定；
 // * 被控端光标隐藏时只是移动（第一人称游戏）：持续移动一小会儿光标还是隐藏的才锁定。
 //   Windows 打字时会暂时隐藏光标，鼠标一动就重新出现，这种情况不锁定；
-// * 被控端光标重新出现：自动锁定的解除锁定，本机指针回到锁定时的位置（游戏也会把光标放回原处）；
+// * 被控端光标重新出现：自动锁定的解除锁定，本机指针回到锁定时的位置（游戏也会把光标放回原处）。
+//   按着鼠标键时光标出现了先不算，松开所有键再解除：有的游戏按住键转视角时光标一闪一闪（隐藏 / 出现来回跳），
+//   跟着它解除、再锁定，浏览器每次都提示"按 Esc 显示光标"，中间还改发绝对坐标，视角乱跳；
 // * 用户按 Esc 解除了锁定：到下一次点击之前不再自动锁定，指针照常显示；
 // * 手动锁定（Ctrl+Alt+Shift+M 或工具栏）：不管被控端光标，直到再切换一次或者按 Esc。
 //
@@ -65,8 +67,10 @@ export class RemoteInput {
   private abort = new AbortController();
 
   // ── 相对移动 ──
-  /** 被控端的光标隐藏了 */
+  /** 被控端的光标隐藏了（按着鼠标键时出现了先不算，见 setRemoteCursorHidden） */
   private remoteHidden = false;
+  /** 被控端最新说的：光标隐藏着。按着键时 remoteHidden 可能还是 true，松开所有键时再跟上它 */
+  private remoteHiddenNow = false;
   /** 用户手动锁定了鼠标 */
   private manual = false;
   /** 请求了锁定，还没有结果 */
@@ -130,13 +134,19 @@ export class RemoteInput {
     this.wheel = { x: 0, y: 0 };
     this.frac = { x: 0, y: 0 };
     this.remoteHidden = false;
+    this.remoteHiddenNow = false;
     this.hiddenMoveSince = null;
     this.userUnlocked = false;
     this.cancelEscHold();
     this.unlock();
   }
   dispose() { this.manual = false; this.reset(); this.abort.abort(); }
-  releaseAll() { this.pressed.clear(); this.buttons = 0; this.enqueue([{ type: "releaseAll" }], true); }
+  releaseAll() {
+    this.pressed.clear();
+    this.buttons = 0;
+    this.enqueue([{ type: "releaseAll" }], true);
+    this.settleRemoteCursor();
+  }
   focus() { this.canvas.focus({ preventScroll: true }); }
 
   enqueue(events: InputEvent[], urgent: boolean) {
@@ -177,6 +187,18 @@ export class RemoteInput {
 
   /** 被控端的光标隐藏 / 出现了 */
   setRemoteCursorHidden(hidden: boolean) {
+    this.remoteHiddenNow = hidden;
+    // 按着键时（游戏按住键转视角）光标出现了：松开所有键再算（见文件开头、settleRemoteCursor）
+    if (!hidden && this.remoteHidden && this.buttons !== 0) return;
+    this.applyRemoteHidden(hidden);
+  }
+
+  /** 松开了所有鼠标键：按着键期间光标出现了的，现在解除 */
+  private settleRemoteCursor() {
+    if (this.buttons === 0 && this.remoteHidden && !this.remoteHiddenNow) this.applyRemoteHidden(false);
+  }
+
+  private applyRemoteHidden(hidden: boolean) {
     if (this.remoteHidden === hidden) return;
     this.remoteHidden = hidden;
     this.hiddenMoveSince = null;
@@ -314,10 +336,12 @@ export class RemoteInput {
         else if (now - this.hiddenMoveSince >= AUTO_LOCK_AFTER_MS) this.lock();
       }
       if (buttons.length) this.enqueue(buttons, true);
-      return;
+    } else {
+      // 绝对坐标：先移到按下 / 松开的位置
+      this.enqueue([{ type: "mouseMove", ...this.pos(e) }, ...buttons], urgent || buttons.length > 0);
     }
-    // 绝对坐标：先移到按下 / 松开的位置
-    this.enqueue([{ type: "mouseMove", ...this.pos(e) }, ...buttons], urgent || buttons.length > 0);
+    // 松开最后一个键（照上面的方式发出去之后）：按着键期间光标出现了的，现在解除
+    if (buttons.length) this.settleRemoteCursor();
   }
 
   private bind() {

@@ -1,6 +1,7 @@
 package app.airhand.android.ui.session
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -127,15 +128,19 @@ class GesturesTest {
     fun touchDragBecomesRelativeWhenTheGameHidesTheCursor() {
         g.mode = Gestures.Mode.TOUCH
         g.down(p(500f, 250f), 0)
+        assertFalse(g.pressing)
         g.move(listOf(p(540f, 250f)), 50)
         // 拖动开始时还是绝对坐标：移到按下的位置、按下左键
         assertEquals(listOf("move 0.50 0.50", "move 0.50 0.50", "left down", "move 0.54 0.50"), log)
+        // 按着左键（RemoteView 据此在松开之前不因为光标出现就改回发位置）
+        assertTrue(g.pressing)
         log.clear()
         // 游戏开始转视角，光标隐藏了：之后发手指移动了多少
         g.relative = true
         g.move(listOf(p(640f, 300f)), 100)
         g.up(p(640f, 300f), 150)
         assertEquals(listOf("delta 0.100 0.100", "left up"), log)
+        assertFalse(g.pressing)
     }
 
     @Test

@@ -78,6 +78,10 @@ class Gestures(private val out: Out, private val timers: Timers, private val slo
     /** 发相对移动（见类的说明）。只对触控板和触屏方式有用：直通、多点触摸是控制手机，没有光标 */
     var relative = false
 
+    /** 按着左键拖动着（触屏拖动、触控板的"点一下再按住拖动"） */
+    val pressing: Boolean
+        get() = dragging
+
     /** 远端指针（归一化） */
     var cursorX = 0.5f
         private set

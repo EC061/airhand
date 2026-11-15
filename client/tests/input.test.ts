@@ -132,13 +132,89 @@ test("被控端光标隐藏时：按着右键就锁定、发相对移动，松�
   ]);
   batches.length = 0;
 
-  // 光标出现了：回到绝对坐标
+  // 光标出现了，可左键还按着：松开之前照样发相对移动；松开那一下也是（不带绝对坐标），之后回到绝对坐标
   input.setRemoteCursorHidden(false);
+  assert.equal(input.relative, true);
+  fire("pointerup", { button: 0, buttons: 0, movementX: 1, movementY: 1, clientX: 10, clientY: 10 });
   assert.equal(input.relative, false);
-  fire("pointermove", { buttons: 0, movementX: 1, movementY: 1, clientX: 10, clientY: 10 });
+  assert.equal(modes, 2);
+  fire("pointermove", { buttons: 0, movementX: 1, movementY: 1, clientX: 20, clientY: 20 });
   await new Promise((r) => setTimeout(r, 20));
-  // 先移到松开的位置再松开
-  assert.deepEqual(batches.flat(), [{ type: "mouseMove", x: 0.1, y: 0.1 }, { type: "mouseButton", button: "left", down: false }]);
+  assert.deepEqual(batches.flat(), [
+    { type: "mouseDelta", dx: 1, dy: 1 },
+    { type: "mouseButton", button: "left", down: false },
+    { type: "mouseMove", x: 0.2, y: 0.2 },
+  ]);
+  input.dispose();
+});
+
+test("按着键转视角时被控端光标一闪一闪：一直锁定、发相对移动，松开所有键才解除", async (t) => {
+  const batches: any[][] = [];
+  const { canvas, fire } = fakeCanvas();
+  t.after(fakeLockDocument(canvas));
+  let lockRequests = 0;
+  const request = canvas.requestPointerLock;
+  canvas.requestPointerLock = () => { lockRequests++; return request(); };
+  const input = new RemoteInput(canvas, () => true, events => batches.push(events));
+  input.interactive = true;
+
+  fire("pointerdown", { button: 2, buttons: 2, clientX: 50, clientY: 50, pointerId: 1, movementX: 0, movementY: 0 });
+  input.setRemoteCursorHidden(true);
+  assert.equal(input.locked, true);
+  await Promise.resolve();
+  batches.length = 0;
+
+  // 转视角期间光标出现、隐藏来回跳：不解除、不再请求锁定，一直发移动量
+  for (let i = 0; i < 5; i++) {
+    input.setRemoteCursorHidden(false);
+    assert.equal(input.locked, true);
+    assert.equal(input.relative, true);
+    fire("pointermove", { buttons: 2, movementX: 2, movementY: 0, clientX: 50, clientY: 50 });
+    input.setRemoteCursorHidden(true);
+  }
+  assert.equal(lockRequests, 1);
+
+  // 最后一次是隐藏：松开之后照样锁着，等光标真的出现了才解除
+  fire("pointerup", { button: 2, buttons: 0, movementX: 0, movementY: 0, clientX: 50, clientY: 50 });
+  assert.equal(input.locked, true);
+  input.setRemoteCursorHidden(false);
+  assert.equal(input.locked, false);
+
+  // 再转一次，最后一次是出现：松开的那一下（还是相对移动）之后马上解除
+  fire("pointerdown", { button: 2, buttons: 2, clientX: 50, clientY: 50, pointerId: 1, movementX: 0, movementY: 0 });
+  input.setRemoteCursorHidden(true);
+  input.setRemoteCursorHidden(false);
+  assert.equal(input.locked, true);
+  fire("pointerup", { button: 2, buttons: 0, movementX: 3, movementY: 0, clientX: 50, clientY: 50 });
+  assert.equal(input.locked, false);
+  assert.equal(input.relative, false);
+  assert.equal(lockRequests, 2);
+
+  await new Promise((r) => setTimeout(r, 20));
+  // 转视角期间只发移动量；唯一的绝对坐标是第二次按下之前（那时光标显示着）
+  const sent = batches.flat();
+  assert.equal(sent.filter(e => e.type === "mouseDelta").reduce((n, e) => n + e.dx, 0), 13);
+  assert.deepEqual(sent.filter(e => e.type !== "mouseDelta"), [
+    { type: "mouseButton", button: "right", down: false },
+    { type: "mouseMove", x: 0.5, y: 0.5 },
+    { type: "mouseButton", button: "right", down: true },
+    { type: "mouseButton", button: "right", down: false },
+  ]);
+  input.dispose();
+});
+
+test("按着键时失去焦点（全部松开）：按着键期间出现的光标也就算数了", (t) => {
+  const { canvas, fire } = fakeCanvas();
+  t.after(fakeLockDocument(canvas));
+  const input = new RemoteInput(canvas, () => true, () => {});
+  input.interactive = true;
+  fire("pointerdown", { button: 2, buttons: 2, clientX: 0, clientY: 0, pointerId: 1, movementX: 0, movementY: 0 });
+  input.setRemoteCursorHidden(true);
+  input.setRemoteCursorHidden(false);
+  assert.equal(input.locked, true);
+  fire("blur", {});
+  assert.equal(input.locked, false);
+  assert.equal(input.relative, false);
   input.dispose();
 });
 
