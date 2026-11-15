@@ -20,7 +20,7 @@ Environment variables (see `docker-compose.yml`):
 | `AIRHAND_CONNECTS_PER_MINUTE` | `6` | Max connections per minute from one IPv4 address / IPv6 /64 to the same host (never lower than `AIRHAND_MAX_SESSIONS`; raise it if many controllers behind one public IP connect to the same host) |
 | `RUST_LOG` | `info` | Log level |
 
-The image is based on distroless, runs as a non-root user, and is about 28 MB.
+The image is based on distroless and is about 28 MB. It runs as root inside the container, so the bind-mounted `data/` is writable whoever owns it (Docker creates it as root if it doesn't exist). On a Linux host with rootful Docker, the files the server creates there belong to root: use `sudo` to read, back up or delete them.
 
 **UDP buffers**: the server sets its socket's send and receive buffers to 8 MiB (the system default is only about 208 KB, which a burst of video at a few tens of Mbps fills up, dropping whole batches of packets: stutter and latency spikes). The Linux kernel silently caps anything above `net.core.rmem_max` / `wmem_max` (this can't be changed from inside the container; set it on the host), and the server logs a warning at startup when that happens:
 
@@ -66,4 +66,4 @@ Environment variables (see `web/docker-compose.yml` and `web/.env.example`):
 - The clipboard is the browser's: text copied on the remote computer is written to this computer's clipboard (while the page is in front); text copied here is sent when you come back to the page, which needs the browser's permission to read the clipboard (Chrome / Edge ask the first time). Firefox doesn't let pages read the clipboard on their own, so there it only syncs from the remote side
 - Outside fullscreen the browser keeps some shortcuts (Ctrl+W, Ctrl+T…) for itself; in fullscreen Chrome / Edge lock the keyboard, so the Win key, Alt+Tab and the like go to the remote computer
 - Behind a reverse proxy (for your own domain and certificate): proxy to the container's `http://…:8080`, forward WebSockets (`/ws`) and keep the `Host` header (or set `X-Forwarded-Host`), otherwise the WebSocket is rejected as cross-site. A sub-path works too
-- The image is based on distroless, runs as a non-root user, and is about 30 MB. It only needs outbound UDP (to the relay) and this one inbound TCP port
+- The image is based on distroless, runs as root inside the container (like the relay's, so the bind-mounted `web/data/` is writable whoever owns it; with rootful Docker the files in it belong to root on the host), and is about 30 MB. It only needs outbound UDP (to the relay) and this one inbound TCP port

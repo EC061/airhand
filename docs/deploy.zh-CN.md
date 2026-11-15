@@ -20,7 +20,7 @@
 | `AIRHAND_CONNECTS_PER_MINUTE` | `6` | 同一个 IPv4 地址 / IPv6 的 /64 一分钟内最多向同一台被控端发起几次连接（不低于 `AIRHAND_MAX_SESSIONS`；很多控制端共用一个出口 IP 连同一台被控端时调大） |
 | `RUST_LOG` | `info` | 日志级别 |
 
-镜像基于 distroless、以非 root 用户运行，约 28 MB。
+镜像基于 distroless，约 28 MB，容器里以 root 运行：挂载进来的 `data/` 不管属于谁都写得进去（目录不存在时 Docker 会替你建一个属于 root 的）。Linux 宿主机上用 rootful Docker 时，服务在里面生成的文件属于 root，读取、备份、删除要用 sudo。
 
 **UDP 缓冲区**：服务器把 socket 的收发缓冲区设成 8 MiB（系统默认只有约 208 KB，几十 Mbps 的画面一个突发就能把它填满、整批丢包，表现为卡顿和延迟尖峰）。Linux 内核会把超过 `net.core.rmem_max` / `wmem_max` 的部分悄悄截掉（容器里改不了，要在宿主机上改），被截掉时服务器启动时会在日志里警告：
 
@@ -66,4 +66,4 @@ AIRHAND_SERVER=relay.example.com:4433 AIRHAND_SERVER_FP=<服务器证书指纹> 
 - 剪贴板用的是浏览器的剪贴板：对方复制的文本写进本机剪贴板（页面在前台时）；本机复制的文本在回到这个页面时发给对方，需要浏览器允许读取剪贴板（Chrome / Edge 第一次会询问）。Firefox 不允许网页自动读取剪贴板，只能从对方同步过来
 - 不全屏时，Ctrl+W、Ctrl+T 等快捷键会被浏览器拦截；全屏时 Chrome / Edge 会锁定键盘，Win、Alt+Tab 等也发给远端
 - 放在反向代理后面（例如用自己的域名和证书）：代理到容器的 `http://…:8080`，需要转发 WebSocket（`/ws`）并保留 `Host` 头（或设置 `X-Forwarded-Host`），否则会被当成跨站请求拒绝。可以放在子路径下
-- 镜像基于 distroless、以非 root 用户运行，约 30 MB。只需要出站的 UDP（到中转服务器）和入站的这一个 TCP 端口
+- 镜像基于 distroless，约 30 MB，容器里以 root 运行（和中转服务器的一样：挂载进来的 `web/data/` 不管属于谁都写得进去；用 rootful Docker 时里面的文件在宿主机上属于 root）。只需要出站的 UDP（到中转服务器）和入站的这一个 TCP 端口

@@ -20,14 +20,14 @@ COPY web/src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/web/target \
     cargo build --release --locked \
- && cp target/release/airhand-web /airhand-web \
- && mkdir -p /data
+ && cp target/release/airhand-web /airhand-web
 
-# ── 运行（distroless，无 shell，非 root）────────────────
-FROM gcr.io/distroless/cc-debian12:nonroot
+# ── 运行（distroless，无 shell，以 root 运行）────────────
+# 以 root 运行（不用 :nonroot 标签、不设 USER）：挂载进来的 /data 不管属于谁都写得进去。目录不存在时 Docker 替你建的属于 root，
+# 自己 mkdir 的属于你的用户，nonroot（65532）都写不进去，服务会因为写不了证书而退出。代价：data/ 里生成的文件在宿主机上属于 root。
+FROM gcr.io/distroless/cc-debian12
 COPY --from=builder /airhand-web /usr/local/bin/airhand-web
 COPY --from=ui /ui/dist /usr/share/airhand/www
-COPY --from=builder --chown=65532:65532 /data /data
 ENV AIRHAND_WEB_LISTEN=0.0.0.0:8080 \
     AIRHAND_WEB_ROOT=/usr/share/airhand/www \
     AIRHAND_WEB_CERT=/data/cert.pem \
@@ -38,5 +38,4 @@ ENV AIRHAND_WEB_LISTEN=0.0.0.0:8080 \
 VOLUME ["/data"]
 # HTTP 和 HTTPS 共用这一个端口
 EXPOSE 8080/tcp
-USER nonroot
 ENTRYPOINT ["/usr/local/bin/airhand-web"]
