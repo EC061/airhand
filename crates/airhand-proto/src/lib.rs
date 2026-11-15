@@ -217,7 +217,8 @@ impl SessionHeader {
 /// 服务器只看开头的会话 ID：发送方是这个会话的一端，就原样转给另一端，否则丢掉。
 /// 后面是端到端加密的内容（见 [`handshake`] 的"之后的每一帧"），种类决定用哪把密钥：
 ///
-/// * [`AUDIO`]：被控端的声音：最新的一包和之前一两包的副本（见 [`media`] 的"声音数据报"）；
+/// * [`AUDIO`]：声音：最新的一包和之前一两包的副本（见 [`media`] 的"声音数据报"）。被控端发的是它的系统声音，
+///   控制端发的是它的麦克风（双方都支持 [`features::session::MIC`]、控制端打开了麦克风时，见 [`session`] 的"麦克风"）；
 /// * [`CONTROL`]：控制数据报（[`session::ControllerDatagram`] / [`session::HostDatagram`]：Ping、Pong、画面确认、
 ///   量两条路往返时延的探测和回声），CBOR，和控制通道上的消息一样不认识的跳过。
 ///
@@ -299,7 +300,7 @@ impl<'b, C> minicbor::Decode<'b, C> for Features {
     }
 }
 
-/// 能力位的编号（见 [`Features`]）。v9 的功能都是必备的，不占位；以后的可选功能从 0 号位开始分配
+/// 能力位的编号（见 [`Features`]）。v9 的功能都是必备的，不占位；之后的可选功能从 0 号位开始分配
 pub mod features {
     /// 信令层：客户端 ⇄ 服务器
     pub mod signal {
@@ -313,8 +314,13 @@ pub mod features {
     pub mod session {
         use crate::Features;
 
+        /// 0 号位：控制端的麦克风（见 [`crate::session`] 的"麦克风"）。懂 [`crate::session::HostMsg::Mic`]、
+        /// [`crate::session::ControllerMsg::Mic`] 和控制端发的声音数据报。被控端能不能真的接（有没有虚拟麦克风）
+        /// 是 `HostMsg::Mic` 里的状态，不是能力位
+        pub const MIC: Features = Features::from_bits(1 << 0);
+
         /// 本端支持的
-        pub const SUPPORTED: Features = Features::NONE;
+        pub const SUPPORTED: Features = MIC;
     }
 }
 

@@ -77,6 +77,8 @@ windows = { version = "0.62", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_HiDpi",
+  # 声音设备的属性（控制端的麦克风：按接口名找 Steam Streaming Microphone、读它的设备格式）
+  "Win32_UI_Shell_PropertiesSystem",
   "Win32_Security",
 ] }
 

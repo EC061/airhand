@@ -23,6 +23,8 @@ npm test
 cargo test --lib
 # audio loopback capture (needs an audio output device; plays a 1.5 s test tone at -60 dBFS, barely audible)
 cargo test --lib loopback_captures_tone -- --ignored --nocapture
+# Windows: the controller's microphone into Steam Streaming Microphone (needs it on this computer), recorded back as a 1 kHz tone
+cargo test --lib mic_reaches_steam_streaming_microphone -- --ignored --nocapture
 
 # android/native/: Android Rust core (runs on this computer: in-flight control, keyframes, audio fan-out, command format)
 cargo test
@@ -51,6 +53,7 @@ AIRHAND_CERT=target/e2e/cert.pem AIRHAND_KEY=target/e2e/key.pem ./target/debug/a
 # client/src-tauri/
 cargo test --lib e2e_roundtrip -- --ignored --nocapture   # video / codec switching / clipboard / audio / ping / disconnect
 cargo test --lib e2e_reconnect -- --ignored --nocapture   # getting the code back after a server restart, changing the code
+cargo test --lib e2e_mic -- --ignored --nocapture         # Windows: the controller's microphone through the relay into Steam Streaming Microphone
 ```
 
 ## Debugging tools

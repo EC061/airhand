@@ -18,7 +18,9 @@
 //!   就处理了（确认交给 [`Platform::acks`]），不等这里：这里可能正等着平台重建编码管线（见 [`super::HostStreams`]）；
 //! * 本机用户断开所有控制端（[`Incoming::kick`]）时发 [`HostMsg::Bye`]，然后结束；
 //! * 控制端的请求在会话的读任务里就换成了 [`Request`]（见 [`super::HostStreams`]）交给平台：画质设置做过范围校验，
-//!   过时的输入已经换成了"释放所有按键"，对方版本新增的输入事件已经去掉了。
+//!   过时的输入已经换成了"释放所有按键"，对方版本新增的输入事件已经去掉了；
+//! * 控制端麦克风的声音包和画面确认一样在读任务里就交给平台（[`Platform::mic`]），放不放进虚拟麦克风由平台决定
+//!   （控制端打开了麦克风、[`Request::Mic`]，才放；会话开始之前的请求不会到平台）。
 //!
 //! 协议加了新的控制端消息，读任务里的 `match` 编译不过：在那里决定它是什么 [`Request`]（或者协议层自己处理），
 //! 各平台跟着实现，不会一边做了、一边忘了。
@@ -48,6 +50,13 @@ pub trait Acks: Send + Sync + 'static {
     fn path_changed(&self, lost: bool) {
         let _ = lost;
     }
+}
+
+/// 控制端麦克风的声音交给谁（[`Platform::mic`]，见 `airhand_proto::session` 的"麦克风"）。在读任务里调用：要快，不能等什么
+pub trait MicSink: Send + Sync + 'static {
+    /// 一个声音包（`airhand_proto::media` 格式：头 + Opus 包）。数据报里的副本已经去掉了、丢了的补上了，
+    /// 按采集先后一个一个来（见 `crate::audio`）
+    fn packet(&self, packet: Vec<u8>);
 }
 
 impl Acks for crate::flow::Flow {
@@ -110,6 +119,8 @@ pub enum Request {
     Clipboard(String),
     /// 打开 / 关闭声音
     Audio(bool),
+    /// 打开 / 关闭控制端的麦克风（见 [`MicSink`]）
+    Mic(bool),
 }
 
 /// 会话怎么开始：握手里的画质和要不要声音，同意之前又收到的设置也算进来
@@ -160,6 +171,12 @@ pub trait Platform: Send {
 
     /// 画面确认交给谁。会话一开始取一次；确认在读任务里就交给它，不经过 [`Platform::request`]
     fn acks(&self) -> Arc<dyn Acks>;
+
+    /// 控制端麦克风的声音交给谁。会话一开始取一次，和画面确认一样在读任务里就交给它。
+    /// 默认没有（收到的丢掉）：这个平台不接麦克风
+    fn mic(&self) -> Option<Arc<dyn MicSink>> {
+        None
+    }
 
     /// 会话开始（不用同意，或者本机用户同意了）：发 [`HostMsg::Hello`] 和开始时的提示，开始采集
     fn start(&mut self, start: Start) -> impl Future<Output = Result<()>> + Send;
@@ -297,6 +314,9 @@ async fn drive<P: Platform>(
         return Ok(());
     }
     incoming.set_acks(platform.acks());
+    if let Some(mic) = platform.mic() {
+        incoming.set_mic(mic);
+    }
     let mut start = Start {
         settings: admitted.settings,
         audio: admitted.audio,

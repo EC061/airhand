@@ -93,6 +93,23 @@ export const IconVolumeOff = (p: P) =>
       <path d="M16 9.5l5 5M21 9.5l-5 5" />
     </>,
   );
+/** 麦克风（把本机的麦克风发给对方） */
+export const IconMic = (p: P) =>
+  base(
+    p,
+    <>
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M9 21h6" />
+    </>,
+  );
+export const IconMicOff = (p: P) =>
+  base(
+    p,
+    <>
+      <path d="M15 9.5V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 4.6 2.5" />
+      <path d="M5.5 11a6.5 6.5 0 0 0 10.4 5.2M18.4 12.6c.07-.5.1-1 .1-1.6M12 17.5V21M9 21h6M4 4l16 16" />
+    </>,
+  );
 export const IconExpand = (p: P) => base(p, <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />);
 export const IconShrink = (p: P) => base(p, <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />);
 export const IconPower = (p: P) => base(p, <path d="M12 3v8M6.4 6.6a8 8 0 1 0 11.2 0" />);

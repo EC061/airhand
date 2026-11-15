@@ -34,6 +34,11 @@ test("媒体包：头和数据按 media.ts 解析，负载从头里写的长度�
     }
   }
   assert.equal(media.kind(new DataView(new ArrayBuffer(10))), 0, "不到一个头长");
+  // 本机麦克风的声音包和被控端打的一模一样（Rust 的 AudioHeader::encode）
+  for (const m of fixture.media.filter((m: { kind: number; hex: string }) => m.kind === media.AUDIO && bytes(m.hex)[3] === media.HEADER_LEN)) {
+    const built = media.audioPacket({ seq: m.seq, start: m.start, captureUs: m.captureUs }, bytes(m.payload));
+    assert.equal(hex(built), m.hex, m.name);
+  }
   // 不认识的编码格式：不猜成 H.264（序号照样读得出来，收到就确认）
   const first = bytes(fixture.media[0].hex);
   first[2] = 9;
@@ -61,7 +66,7 @@ test("输入事件、命令和连接选项的 JSON 形状与 Rust 一致", () =>
   const button = { type: "mouseButton", button: "right", down: true };
   assert.deepEqual(events[2], button);
   const cmds = commands.map((c) => c.cmd).sort();
-  assert.deepEqual(cmds, ["ack", "audio", "clipboard", "clipboardSync", "disconnect", "display", "input", "keyframe", "settings"]);
+  assert.deepEqual(cmds, ["ack", "audio", "clipboard", "clipboardSync", "disconnect", "display", "input", "keyframe", "mic", "settings"]);
   const settings = commands.find((c) => c.cmd === "settings");
   assert.deepEqual(settings, {
     cmd: "settings",

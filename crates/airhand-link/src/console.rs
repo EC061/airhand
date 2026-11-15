@@ -14,7 +14,10 @@
 //! * 文本（JSON，camelCase）：`{"id": 1, "cmd": "connect", ...参数}`，命令见 [`Call`]：`appInfo`、`connect`、`ping`，
 //!   加上对会话的操作 [`Command`]（和 Android 一样）。带 `id` 的会收到回复；不带的（输入事件这类高频消息）不回复。
 //!   一条连接上的命令按收到的先后执行（例如按下和松开）；
-//! * 二进制：画面确认每帧都有，不走 JSON：`1u8 | sid u32 LE | seq u32 LE`（[`parse_ack`]），不回复。
+//! * 二进制，不走 JSON、不回复：
+//!   * 画面确认（每帧都有）：`1u8 | sid u32 LE | seq u32 LE`（[`parse_ack`]）；
+//!   * 麦克风的声音包（每 20 ms 一个，见 [`crate::controller`] 的"麦克风"）：`2u8 | sid u32 LE | 声音包`（[`parse_mic`]，
+//!     声音包是 `airhand_proto::media` 的格式：头 + Opus 包）。
 //!
 //! 服务 → 控制台：
 //! * 文本（JSON），见 [`Out`]：
@@ -65,6 +68,8 @@ const MAX_CONNECTING: usize = 64;
 
 /// 二进制消息的类型：画面确认
 const BINARY_ACK: u8 = 1;
+/// 二进制消息的类型：麦克风的声音包
+const BINARY_MIC: u8 = 2;
 
 /// WebSocket 的一条消息。两边用的 WebSocket 库不同，各自和它互相转换
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +104,14 @@ pub fn parse_ack(b: &[u8]) -> Option<(u32, u32)> {
         u32::from_le_bytes([s0, s1, s2, s3]),
         u32::from_le_bytes([q0, q1, q2, q3]),
     ))
+}
+
+/// 控制台发来的麦克风声音包 `2u8 | sid u32 LE | 声音包` → `(sid, 声音包)`（声音包对不对由会话检查）
+pub fn parse_mic(b: &Bytes) -> Option<(u32, Bytes)> {
+    let [BINARY_MIC, s0, s1, s2, s3, ..] = **b else {
+        return None;
+    };
+    Some((u32::from_le_bytes([s0, s1, s2, s3]), b.slice(5..)))
 }
 
 /// 控制台 → 服务的命令
@@ -243,6 +256,8 @@ where
                 WsMessage::Binary(b) => {
                     if let Some((sid, seq)) = parse_ack(&b) {
                         let _ = console.svc.ack(sid, seq);
+                    } else if let Some((sid, packet)) = parse_mic(&b) {
+                        let _ = console.svc.mic(sid, packet);
                     }
                 }
                 WsMessage::Close => return Ok(()),
@@ -421,6 +436,25 @@ mod tests {
         assert_eq!(parse_ack(&[2, 3, 0, 0, 0, 0x2a, 1, 0, 0]), None);
         assert_eq!(parse_ack(&[1, 3, 0, 0, 0]), None);
         assert_eq!(parse_ack(&[]), None);
+    }
+
+    /// 前端（client/src/lib/media.ts 的 micMessage）发的麦克风声音包：不拷贝，取后面的部分
+    #[test]
+    fn binary_mic_packets() {
+        let b = Bytes::from_static(&[2, 3, 1, 0, 0, 9, 8, 7]);
+        let (sid, packet) = parse_mic(&b).unwrap();
+        assert_eq!((sid, &packet[..]), (259, &[9u8, 8, 7][..]));
+        assert_eq!(packet.as_ptr(), b[5..].as_ptr());
+        assert_eq!(
+            parse_mic(&Bytes::from_static(&[2, 3, 0, 0, 0]))
+                .unwrap()
+                .1
+                .len(),
+            0
+        );
+        assert!(parse_mic(&Bytes::from_static(&[2, 3, 0, 0])).is_none());
+        assert!(parse_mic(&Bytes::from_static(&[1, 3, 0, 0, 0, 1, 0, 0, 0])).is_none());
+        assert!(parse_mic(&Bytes::new()).is_none());
     }
 
     fn outbox(messages: usize, bytes: usize) -> (Outbox, mpsc::Receiver<Queued>) {

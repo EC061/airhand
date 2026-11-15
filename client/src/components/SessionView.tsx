@@ -13,6 +13,8 @@ import {
   IconExpand,
   IconFit,
   IconKeyboard,
+  IconMic,
+  IconMicOff,
   IconMonitor,
   IconMouse,
   IconPower,
@@ -86,7 +88,7 @@ const combosFor = (platform: Platform | null, os: string) => {
   return os === "" || /windows/i.test(os) ? WINDOWS_COMBOS : /^macos/i.test(os) ? MAC_COMBOS : LINUX_COMBOS;
 };
 
-type Menu = null | "quality" | "keys" | "display" | "clipboard" | "audio" | "sessions";
+type Menu = null | "quality" | "keys" | "display" | "clipboard" | "audio" | "mic" | "sessions";
 
 /** 顶端热区的高度（和 .hot-edge 一致） */
 const HOT_EDGE = 6;
@@ -439,6 +441,35 @@ export function SessionView({ s }: { s: RemoteSession }) {
               </Dropdown>
             )}
           </div>
+          {s.micState !== null && s.micState !== "unsupported" && (
+            // 本机的麦克风：对方能接（有虚拟麦克风）时才有
+            <div className="menu-anchor">
+              <button
+                className={`tb-btn icon ${menu === "mic" ? "on" : ""}`}
+                title={s.micLive ? t("session.micOn") : t("session.mic")}
+                onClick={() => toggleMenu("mic")}
+              >
+                {s.micEnabled ? <IconMic size={17} /> : <IconMicOff size={17} />}
+                {micProblem(s) ? <span className="tb-dot warn" /> : s.micLive && <span className="tb-dot" />}
+              </button>
+              {menu === "mic" && (
+                <Dropdown onClose={closeMenu} className="audio-menu">
+                  <label className="dd-item toggle">
+                    <span>
+                      {t("mic.send")}
+                      <span className="muted small block">{micHint(s)}</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      className="switch"
+                      checked={s.micEnabled}
+                      onChange={(e) => s.setMicEnabled(e.target.checked)}
+                    />
+                  </label>
+                </Dropdown>
+              )}
+            </div>
+          )}
           {s.hostPlatform !== "android" && (
             // 游戏：鼠标锁定在画面上、发相对移动（被控端隐藏光标时会自动这样做，这里是手动的）
             <button
@@ -576,6 +607,25 @@ function audioHint(s: RemoteSession): string {
   if (s.audioError !== null) return t("notice.audioFailed", { detail: s.audioError });
   const st = s.audio.stats;
   return st ? t("audio.jitter", { ms: Math.round(st.targetMs) }) : t("audio.remote");
+}
+
+/** 麦克风打开了、但声音没发过去（本机采集不了，或者对方现在接不了） */
+function micProblem(s: RemoteSession): boolean {
+  return s.micError !== null || (s.micEnabled && s.micState !== "ready");
+}
+
+function micHint(s: RemoteSession): string {
+  if (s.micError !== null) return t(`mic.local.${s.micError}` as const);
+  switch (s.micState) {
+    case "noDevice":
+      return t("mic.noDevice");
+    case "busy":
+      return t("mic.busy");
+    case "failed":
+      return t("mic.failed", { detail: s.micDetail ?? "—" });
+    default:
+      return s.micLive ? t("mic.live") : t("mic.ready");
+  }
 }
 
 function syncHint(s: RemoteSession): string {

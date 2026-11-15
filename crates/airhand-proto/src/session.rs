@@ -66,6 +66,18 @@
 //! 控制端要关键帧时带着它收到的最后一帧的序号（[`ControllerMsg::RequestKeyframe::after`]）：被控端在那之后已经发过
 //! 关键帧（正在路上）就不再编一个。控制端的几个地方（解码出错、换路时缺了帧、界面刚切回来）各自要、在一个往返里
 //! 连着要，被控端也只编一个：关键帧是最大的帧，偏偏又是在网络最差的时候要。
+//!
+//! # 麦克风
+//!
+//! 控制端可以把本机麦克风的声音交给被控端，被控端把它放进一个虚拟麦克风，那台电脑上的程序（会议、语音输入）
+//! 就像用着一个本地麦克风。双方都支持（会话能力位 [`crate::features::session::MIC`]）才有：
+//!
+//! * 被控端在 [`HostMsg::Hello`] 之后发 [`HostMsg::Mic`]，说明它现在能不能接（[`MicState`]：平台不支持、
+//!   没有虚拟麦克风、能接、被别的控制端占着、出错了），之后有变化再发；
+//! * 控制端在能接时发 [`ControllerMsg::Mic`] 打开，之后的声音和被控端的声音一样走声音数据报（方向相反，
+//!   同样带着之前几包的副本，见 [`crate::media`] 的"声音数据报"）；关掉时也发 [`ControllerMsg::Mic`]。
+//!   被控端只在打开着的时候接（同一时刻只给一个控制端，后来的是 [`MicState::Busy`]）；
+//! * 被控端没有声音放进去的时候虚拟麦克风里是静音。
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -130,6 +142,32 @@ pub enum HostMsg {
     /// 被控端的直连候选地址：开始（第 `round` 轮）打洞（见模块说明的"直连"）
     #[n(11)]
     Direct(#[n(0)] DirectOffer),
+    /// 被控端现在能不能接控制端的麦克风（见模块说明的"麦克风"）。只发给协商了
+    /// [`crate::features::session::MIC`] 的控制端：Hello 之后发一次，之后有变化再发。
+    /// `detail`：出错时给排查问题用的技术信息（英文，同 [`Notice::CaptureFailed`]）
+    #[n(12)]
+    Mic {
+        #[n(0)]
+        state: MicState,
+        #[n(1)]
+        detail: Option<String>,
+    },
+}
+
+open_enum! {
+    /// 被控端的虚拟麦克风（见模块说明的"麦克风"）。不认识的值（对方版本新增的）控制端当作接不了
+    pub enum MicState {
+        /// 这台被控端的平台还不支持
+        Unsupported = 0 => "unsupported",
+        /// 支持，但没有可用的虚拟麦克风（Windows：Steam Streaming Microphone，装了 Steam、用过一次远程同乐就有）
+        NoDevice = 1 => "noDevice",
+        /// 能接：控制端打开麦克风之后，声音放进虚拟麦克风
+        Ready = 2 => "ready",
+        /// 另一个控制端正在用它（同一时刻只给一个）
+        Busy = 3 => "busy",
+        /// 打不开（例如被别的程序独占了），被控端在重试
+        Failed = 4 => "failed",
+    }
 }
 
 /// 一端的直连候选地址和证书（见模块说明的"直连"）
@@ -161,7 +199,8 @@ impl HostMsg {
             | HostMsg::Encoder(_)
             | HostMsg::Cursor { .. }
             | HostMsg::Bye(_)
-            | HostMsg::Direct(_) => SessionLane::Control,
+            | HostMsg::Direct(_)
+            | HostMsg::Mic { .. } => SessionLane::Control,
         }
     }
 }
@@ -467,6 +506,13 @@ pub enum ControllerMsg {
     /// 控制端的直连候选地址，回答 [`HostMsg::Direct`]（见模块说明的"直连"）
     #[n(9)]
     Direct(#[n(0)] DirectOffer),
+    /// 打开 / 关闭控制端的麦克风（见模块说明的"麦克风"）。只发给协商了 [`crate::features::session::MIC`]
+    /// 的被控端；打开之后的声音走声音数据报
+    #[n(10)]
+    Mic {
+        #[n(0)]
+        enabled: bool,
+    },
 }
 
 impl ControllerMsg {
@@ -478,7 +524,8 @@ impl ControllerMsg {
             | Self::RequestKeyframe { .. }
             | Self::SelectDisplay { .. }
             | Self::Audio { .. }
-            | Self::Direct(_) => SessionLane::Control,
+            | Self::Direct(_)
+            | Self::Mic { .. } => SessionLane::Control,
         }
     }
 }
@@ -857,6 +904,25 @@ mod tests {
         assert_eq!(back.actions, hello.actions);
         assert!(back.touch);
 
+        // 麦克风的状态：新版本加的状态留着原值（控制端当作接不了），没有说明的不带 detail
+        let mic = HostMsg::Mic {
+            state: MicState::Unknown(9),
+            detail: None,
+        };
+        let back: HostMsg = minicbor::decode(&minicbor::to_vec(&mic).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            HostMsg::Mic {
+                state: MicState::Unknown(9),
+                detail: None
+            }
+        ));
+        assert_eq!(back.lane(), SessionLane::Control);
+        assert_eq!(
+            ControllerMsg::Mic { enabled: true }.lane(),
+            SessionLane::Control
+        );
+
         // 按钮不认识的输入事件：解得出来，被控端不执行
         let e = InputEvent::MouseButton {
             button: MouseButton::Unknown(12),
@@ -925,6 +991,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Platform::Android).unwrap(),
             json!("android")
+        );
+        assert_eq!(
+            serde_json::to_value([MicState::NoDevice, MicState::Ready]).unwrap(),
+            json!(["noDevice", "ready"])
         );
     }
 }

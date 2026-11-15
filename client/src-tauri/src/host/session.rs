@@ -1,18 +1,19 @@
 //! 被控端的单个远控会话：桌面版的 [`Platform`]。协议层的事（同意流程、Pong、失联检测、踢人时发 Bye、
-//! 画质设置的校验）在 [`airhand_link::host::serve`]，这里只管采集、编码、注入输入、剪贴板、声音，
-//! 以及定时检查权限和显示器有没有变化。
+//! 画质设置的校验）在 [`airhand_link::host::serve`]，这里只管采集、编码、注入输入、剪贴板、声音、
+//! 控制端的麦克风（见 [`super::mic`]），以及定时检查权限和显示器有没有变化。
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use airhand_link::flow::Flow;
 use airhand_link::host::{
-    Acks, Admission, CursorCache, Incoming, Outbox, Platform, Request, Senders, Start, serve,
+    Acks, Admission, CursorCache, Incoming, MicSink, Outbox, Platform, Request, Senders, Start,
+    serve,
 };
-use airhand_proto::session::{DisplayInfo, HostHello, HostMsg, Notice, QualitySettings};
+use airhand_proto::session::{DisplayInfo, HostHello, HostMsg, MicState, Notice, QualitySettings};
 use anyhow::Result;
 use bytes::Bytes;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{Interval, MissedTickBehavior};
 use tracing::{info, warn};
 
@@ -20,6 +21,7 @@ use super::audio::{self, AudioSubscription};
 use super::capture;
 use super::gate::DesktopGate;
 use super::input::InjectorThread;
+use super::mic::{self, MicInput, MicLease};
 use super::pipeline::Pipeline;
 use crate::clipboard::{self, ClipSync};
 use crate::config;
@@ -38,6 +40,8 @@ const PLATFORM: airhand_proto::session::Platform = airhand_proto::session::Platf
 const PERMISSION_CHECK: Duration = Duration::from_secs(2);
 /// 检查显示器有没有变化（插拔、旋转、改分辨率 / 缩放 / 排列）的间隔
 const DISPLAY_CHECK: Duration = Duration::from_secs(2);
+/// 没有虚拟麦克风（或者打不开）时隔多久再找一次：例如本机的用户这时才用了一次 Steam 远程同乐，驱动装上了
+const MIC_CHECK: Duration = Duration::from_secs(5);
 
 /// 显示器列表变了之后，正在看的显示器在新列表里的序号：按名字找（插拔别的显示器时序号可能变），
 /// 找不到（被拔掉了）就改看主显示器（新列表的第一个）。
@@ -51,6 +55,14 @@ fn follow_display(old: &[DisplayInfo], current: u8, new: &[DisplayInfo]) -> u8 {
 async fn audio_failure(sound: &mut Option<AudioSubscription>) -> Option<String> {
     match sound {
         Some(s) => s.failure_changed().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// 等到麦克风（播放线程）的状态有变化；没有在用麦克风时一直等下去
+async fn mic_changed(mic: &mut Option<MicLease>) -> mic::Status {
+    match mic {
+        Some(m) => m.changed().await,
         None => std::future::pending().await,
     }
 }
@@ -99,6 +111,9 @@ pub async fn run(inc: Incoming, gate: Arc<DesktopGate>) -> Result<()> {
             debug_assert_ne!(admitted.admission, Admission::NeedsApproval);
             let mut desktop = Desktop::new(session_id, senders);
             desktop.identity = Some((gate.clone(), ip, admitted.clone()));
+            desktop.mic.negotiated = admitted
+                .negotiated
+                .has(airhand_proto::features::session::MIC);
             desktop
         },
     )
@@ -134,6 +149,37 @@ struct Desktop {
     display_tick: Interval,
     /// 缺少的系统权限（macOS），见 [`super::missing_permissions`]
     missing: (bool, bool),
+    mic: Mic,
+}
+
+/// 控制端的麦克风（见 [`super::mic`]）
+struct Mic {
+    /// 控制端懂麦克风（协商了 MIC）：会话开始时告诉它这里能不能接，之后有变化再告诉它
+    negotiated: bool,
+    /// 控制端麦克风的声音从读任务交到这里（打开了才交给播放线程）
+    input: Arc<MicInput>,
+    /// 控制端想开着麦克风：开不了（别的会话占着、没有设备）的话，等能开了自动打开
+    wanted: bool,
+    /// 控制端打开了麦克风、而且轮到了这个会话
+    lease: Option<MicLease>,
+    /// 告诉过控制端的状态（一样的不再发）
+    sent: Option<mic::Status>,
+    /// 用麦克风的会话变了（别的会话放开了）
+    owner: watch::Receiver<Option<u64>>,
+    /// 没有设备、打不开时定时再看看
+    tick: Interval,
+}
+
+impl Mic {
+    /// 没在用、现在也用不了：要等别的会话放开、设备出现
+    fn waiting(&self) -> bool {
+        self.negotiated && self.lease.is_none()
+    }
+
+    /// 现在用不了是因为设备（没有、打不开）：定时再找
+    fn missing(&self) -> bool {
+        self.waiting() && matches!(self.sent, Some((MicState::NoDevice | MicState::Failed, _)))
+    }
 }
 
 /// 会话开始之后定时要做的事
@@ -143,6 +189,10 @@ enum Tick {
     Audio(Option<String>),
     Permissions,
     Displays,
+    /// 麦克风的播放线程的状态变了（打开了设备、打不开、设备没了……）
+    Mic(mic::Status),
+    /// 别的会话放开了麦克风，或者该再找一次设备了
+    MicCheck,
 }
 
 impl Desktop {
@@ -166,7 +216,42 @@ impl Desktop {
             permission_tick: ticker(PERMISSION_CHECK),
             display_tick: ticker(DISPLAY_CHECK),
             missing: (false, false),
+            mic: Mic {
+                negotiated: false,
+                input: Arc::default(),
+                wanted: false,
+                lease: None,
+                sent: None,
+                owner: mic::owner_changed(),
+                tick: ticker(MIC_CHECK),
+            },
         }
+    }
+
+    /// 告诉控制端麦克风现在怎么样（和上次说的一样就不说了）
+    fn send_mic(&mut self, status: mic::Status) -> Result<()> {
+        if self.mic.sent.as_ref() == Some(&status) {
+            return Ok(());
+        }
+        let (state, detail) = status.clone();
+        self.out.send(&HostMsg::Mic { state, detail })?;
+        self.mic.sent = Some(status);
+        Ok(())
+    }
+
+    /// 控制端要开着麦克风：轮到这个会话了就打开，不然告诉它为什么开不了
+    async fn open_mic(&mut self) -> Result<()> {
+        let status = match mic::open(self.session_id, &self.mic.input) {
+            Ok(lease) => {
+                let s = lease.status();
+                self.mic.lease = Some(lease);
+                s
+            }
+            Err(MicState::Busy) => (MicState::Busy, None),
+            // 不支持：没什么可打开的；没有设备等等由 probe 说明
+            Err(_) => (mic::probe(self.session_id).await, None),
+        };
+        self.send_mic(status)
     }
 
     /// 停掉现在的编码管线（新管线从关键帧开始，旧的编码帧不能夹在中间），在 `current` 上重新开始
@@ -202,6 +287,12 @@ impl Platform for Desktop {
     /// 画面确认直接交给会话的在途控制（读任务里调用，不等这里换显示器、重建管线）
     fn acks(&self) -> Arc<dyn Acks> {
         self.flow.clone()
+    }
+
+    /// 控制端麦克风的声音（读任务里调用）：打开了麦克风才交给播放线程
+    fn mic(&self) -> Option<Arc<dyn MicSink>> {
+        let input: Arc<dyn MicSink> = self.mic.input.clone();
+        self.mic.negotiated.then_some(input)
     }
 
     async fn start(&mut self, start: Start) -> Result<()> {
@@ -251,6 +342,11 @@ impl Platform for Desktop {
         }
         if start.audio {
             self.subscribe_audio()?;
+        }
+        // 控制端懂麦克风：告诉它这里能不能接（它据此显示麦克风的按钮）
+        if self.mic.negotiated {
+            let state = mic::probe(self.session_id).await;
+            self.send_mic((state, None))?;
         }
         Ok(())
     }
@@ -303,6 +399,19 @@ impl Platform for Desktop {
                     self.subscribe_audio()?;
                 }
             }
+            Request::Mic(enabled) if self.mic.negotiated => {
+                self.mic.wanted = enabled;
+                if enabled && self.mic.lease.is_none() {
+                    self.open_mic().await?;
+                } else if !enabled {
+                    // 放开设备，别的会话就能用了
+                    self.mic.lease = None;
+                    let state = mic::probe(self.session_id).await;
+                    self.send_mic((state, None))?;
+                }
+            }
+            // 没协商麦克风的控制端不会发
+            Request::Mic(_) => {}
         }
         Ok(())
     }
@@ -314,6 +423,10 @@ impl Platform for Desktop {
             failure = audio_failure(&mut self.sound) => Tick::Audio(failure),
             _ = self.permission_tick.tick() => Tick::Permissions,
             _ = self.display_tick.tick() => Tick::Displays,
+            status = mic_changed(&mut self.mic.lease) => Tick::Mic(status),
+            // 只关心别的会话放开了麦克风：自己打开、放开的时候不在等
+            _ = self.mic.owner.changed(), if self.mic.waiting() => Tick::MicCheck,
+            _ = self.mic.tick.tick(), if self.mic.missing() => Tick::MicCheck,
         }
     }
 
@@ -371,6 +484,16 @@ impl Platform for Desktop {
                     })?;
                 }
             }
+            Tick::Mic(status) => self.send_mic(status)?,
+            // 能用了的话：控制端一直想开着就打开，不然告诉它现在能开了
+            Tick::MicCheck => {
+                if self.mic.wanted {
+                    self.open_mic().await?;
+                } else {
+                    let state = mic::probe(self.session_id).await;
+                    self.send_mic((state, None))?;
+                }
+            }
         }
         Ok(())
     }
@@ -386,6 +509,7 @@ impl Platform for Desktop {
             p.stop().await;
         }
         self.sound = None;
+        self.mic.lease = None;
     }
 }
 

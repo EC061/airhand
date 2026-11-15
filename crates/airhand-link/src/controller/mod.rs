@@ -46,6 +46,12 @@
 //!
 //! 会话开始之后被控端发来候选地址，控制端从连服务器的那个 endpoint 连过去（见 [`crate::direct`]）。
 //! 连上了对界面没有什么不同，只是更快；画面从直连来的时候 [`SessionEvent::Stats`] 的 `direct` 是 true。
+//!
+//! # 麦克风
+//!
+//! 双方都支持时（`airhand_proto::features::session::MIC`），被控端说明它能不能接麦克风（[`SessionEvent::Mic`]）。
+//! 界面打开麦克风（[`Command::Mic`]）之后自己采集、编码，把打好的声音包交给 [`ControllerService::mic`]：
+//! 这里带上之前几包的副本、加密，发成声音数据报（走画面来的那条路）。界面不知道有冗余、有几条路。
 
 mod cursor;
 mod link;
@@ -65,6 +71,7 @@ use crate::tasks::OwnedTask;
 use crate::wire::{read_msg, write_msg};
 use airhand_proto::framing;
 use airhand_proto::handshake::SEAL_OVERHEAD;
+use airhand_proto::media;
 use airhand_proto::session::{ControllerMsg, InputEvent, MAX_CLIPBOARD_TEXT, QualitySettings};
 use airhand_proto::signal::{ClientMsg, ResumeToken, ServerMsg, SessionGrant, connect_outcome};
 use airhand_proto::{MAX_SIGNAL_MSG, Role};
@@ -88,6 +95,8 @@ pub const CLIPBOARD_POLL: Duration = Duration::from_millis(300);
 
 /// 大块通道（剪贴板）最多排着这么多条：网络慢的时候再复制，丢掉的是这一次（之前排着的发完了就轮到下一次）
 const BULK_QUEUE: usize = 4;
+/// 麦克风的声音包最多排着这么多个没发出去（约 320 ms），再多就丢：本来就是数据报
+const MIC_QUEUE: usize = 16;
 
 /// 本机剪贴板的双向同步（桌面版；实现见客户端的 `clipboard.rs`）。
 pub trait ClipboardSync: Send + 'static {
@@ -144,6 +153,12 @@ pub enum Command {
         sid: u32,
         enabled: bool,
     },
+    /// 打开 / 关闭本机的麦克风（见模块说明的"麦克风"）：打开之后界面把声音包交给 [`ControllerService::mic`]。
+    /// 被控端不支持时什么也不做
+    Mic {
+        sid: u32,
+        enabled: bool,
+    },
     /// 把界面复制的文本发给被控端（网页版、Android：剪贴板由界面自己读）。走大块通道，网络慢、
     /// 前面还排着好几次没发完时丢掉这一次
     Clipboard {
@@ -175,6 +190,7 @@ impl Command {
             | Command::Keyframe { sid }
             | Command::Display { sid, .. }
             | Command::Audio { sid, .. }
+            | Command::Mic { sid, .. }
             | Command::Clipboard { sid, .. }
             | Command::ClipboardSync { sid, .. }
             | Command::Ack { sid, .. }
@@ -230,6 +246,15 @@ struct SessionHandle {
     arrivals: Arc<Mutex<session::Arrivals>>,
     /// 画面确认（控制数据报）
     feedback: Arc<session::Feedback>,
+    /// 麦克风的声音包；被控端不支持（没协商到 MIC）时为 `None`
+    mic: Option<Mic>,
+}
+
+/// 一个会话的麦克风
+struct Mic {
+    tx: mpsc::Sender<Bytes>,
+    /// 界面打开了麦克风（[`Command::Mic`]）：关着的时候交过来的包不发
+    on: AtomicBool,
 }
 
 struct Inner {
@@ -378,6 +403,14 @@ impl ControllerService {
         let sid = self.inner.next_sid.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = queue::channel();
         let (bulk_tx, bulk_rx) = mpsc::channel(BULK_QUEUE);
+        let (mic_tx, mic_rx) = mpsc::channel(MIC_QUEUE);
+        let mic = link
+            .negotiated
+            .has(airhand_proto::features::session::MIC)
+            .then(|| Mic {
+                tx: mic_tx,
+                on: AtomicBool::new(false),
+            });
         // Ping、画面确认：控制数据报，中转上发、直连通着时直连上也发
         let feedback = Arc::new(session::Feedback::new(link.datagrams));
         // 直连：等被控端发来候选地址
@@ -420,6 +453,7 @@ impl ControllerService {
                 offers: offers_tx,
                 task: Box::pin(direct),
             },
+            mic: (grant.session_id, mic_rx, link.mic),
         };
         let registration = link.registration;
         let inner = self.inner.clone();
@@ -442,6 +476,7 @@ impl ControllerService {
                 clipboard,
                 arrivals,
                 feedback,
+                mic,
             },
         );
         info!(sid, code, host = %grant.host_name, %safety, "session established");
@@ -471,6 +506,14 @@ impl ControllerService {
             }
             Command::Display { sid, index } => (sid, ControllerMsg::SelectDisplay { index }),
             Command::Audio { sid, enabled } => (sid, ControllerMsg::Audio { enabled }),
+            Command::Mic { sid, enabled } => {
+                let sessions = self.inner.sessions.lock().unwrap();
+                let s = sessions.get(&sid).ok_or(Problem::NoSession)?;
+                // 被控端不懂麦克风（对方的版本旧）：什么也不做，界面本来也不会显示麦克风
+                let Some(mic) = &s.mic else { return Ok(()) };
+                mic.on.store(enabled, Ordering::Relaxed);
+                return s.tx.send(ControllerMsg::Mic { enabled });
+            }
             Command::Clipboard { sid, text } => {
                 let sessions = self.inner.sessions.lock().unwrap();
                 let s = sessions.get(&sid).ok_or(Problem::NoSession)?;
@@ -512,6 +555,28 @@ impl ControllerService {
             return Ok(());
         };
         s.feedback.ack(seq, arrived);
+        Ok(())
+    }
+
+    /// 界面采集、编码好的一个麦克风声音包（`airhand_proto::media` 格式：头 + Opus 包，见模块说明的"麦克风"）。
+    /// 被控端不支持、麦克风没打开、包不对的丢掉；网络跟不上（排满了）也丢掉
+    pub fn mic(&self, sid: u32, packet: Bytes) -> Result<(), Problem> {
+        let sessions = self.inner.sessions.lock().unwrap();
+        let s = sessions.get(&sid).ok_or(Problem::NoSession)?;
+        let Some(mic) = s.mic.as_ref().filter(|m| m.on.load(Ordering::Relaxed)) else {
+            return Ok(());
+        };
+        if packet.len() > media::MAX_AUDIO_PACKET || media::AudioHeader::decode(&packet).is_none() {
+            debug!(
+                sid,
+                len = packet.len(),
+                "ignoring a malformed microphone packet"
+            );
+            return Ok(());
+        }
+        if let Err(mpsc::error::TrySendError::Full(_)) = mic.tx.try_send(packet) {
+            debug!(sid, "the microphone queue is full, dropping a packet");
+        }
         Ok(())
     }
 

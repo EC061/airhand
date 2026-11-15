@@ -101,6 +101,7 @@ On Windows all of this runs in the system service (see [Windows service](#window
 | Input injection | SendInput (scan codes; relative movement like a real mouse) | CGEvent (virtual key codes; relative movement with deltas) | XTEST (evdev physical key codes; relative motion) | Accessibility service (gestures, system actions, text input) |
 | Hidden cursor (switch to relative movement) | DXGI + `GetCursorInfo` (a software cursor drawn into the image, e.g. while dragging or resizing a window, still counts as shown) | Not detected (lock manually) | XFIXES (fully transparent cursor) | — |
 | Audio capture | WASAPI loopback | ScreenCaptureKit (system mix) | PulseAudio / PipeWire output monitor | AudioPlaybackCapture (Android 10+) |
+| Controller's microphone | Steam Streaming Microphone (WASAPI, see [Microphone](#microphone)) | Not yet | Not yet | Not yet |
 | Clipboard | Change detection via the clipboard sequence number | NSPasteboard change count | XFIXES selection-owner change notifications | Write only (controller → phone) |
 | Console UI | WebView2 | WKWebView | WebKitGTK (WebCodecs decoding via GStreamer) | Jetpack Compose (MediaCodec decoding) |
 
@@ -150,6 +151,21 @@ The host's system sound (not the microphone) is streamed to the controller:
 Only the session you are looking at plays audio (none do in the multi-screen overview); the other hosts are told to stop capturing.
 
 When the host can't capture sound (no audio output device, or no PulseAudio / PipeWire running on Linux, for example), the controller shows a message, the speaker in the toolbar gets a yellow dot and the sound menu gives the reason. The host retries every 2 seconds, and the message goes away once it recovers.
+
+### Microphone
+
+The controller's microphone can go the other way, into a virtual microphone on the host, so programs there hear it like a local one (session feature bit `MIC`, see the "Microphone" section of `crates/airhand-proto/src/session.rs`):
+
+| Stage | How |
+|---|---|
+| State | After `Hello` the host says whether it can take a microphone (`HostMsg::Mic`: unsupported / no virtual microphone / ready / another controller has it / failed, with a technical detail) and again when that changes. The console only shows the microphone button when it can |
+| Capture | Only the session you're looking at, and only when the user turned it on: `getUserMedia` with the browser's echo cancellation, noise suppression and gain control (the remote sound coming out of this computer's speakers isn't recorded back) → AudioWorklet mixes to mono, resamples to 48 kHz and posts 20 ms blocks straight to the console's Worker (`client/src/lib/mic.ts`, `mic-worklet.ts`) |
+| Encoding | WebCodecs Opus, 48 kHz mono, 32 kbps, 20 ms per packet, in the Worker; the same packet format as the host's sound (`media.ts` `audioPacket`), sent to the controller service as a binary WebSocket message `2 \| sid \| packet` (`mic-encoder.ts`) |
+| Transport | The controller service adds copies of the previous packets and seals them into audio datagrams like the host does (controller → host has its own key), on the path the video comes on (direct or relay). Controller and relay drop packets when they can't keep up |
+| Playback | The host's read task decrypts, drops copies and hands packets straight to the platform (`airhand_link::host::MicSink`). On Windows a playback thread decodes them (Opus packet loss concealment covers up to 3 missing packets), buffers 60 ms (drops the excess after a stall so latency doesn't build up) and keeps 40 ms queued in the device (`client/src-tauri/src/host/mic/`) |
+| Virtual microphone | Windows: **Steam Streaming Microphone**, Steam Remote Play's virtual sound card, found by its interface name (not the localized display name). Bytes written to its "Speakers" side come out of its "Microphone" side unchanged, without format conversion, so both sides must use the same format: if their default formats match, shared mode (the system converts); otherwise exclusive mode in the microphone side's format (on this test machine the speaker side is 48 kHz stereo and the microphone side 44.1 kHz mono: writing in the speaker format turns a 1 kHz tone into 459 Hz). Only opened while a controller's microphone is on, one controller at a time; nothing is installed and no system setting is changed |
+
+The end-to-end tests check every hop: `mic_reaches_steam_streaming_microphone` (the host's playback into the real device) and `e2e_mic` (a protocol-level controller through a real relay, with dropped datagrams) record a 1 kHz tone back from "Microphone (Steam Streaming Microphone)".
 
 ## A/V sync (optional, off by default)
 

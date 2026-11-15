@@ -176,6 +176,8 @@ export default {
   "session.playSound": "播放远程声音",
   "session.avSync": "音画同步",
   "session.avSyncHint": "画面等声音对齐，适合看视频；操作会变慢",
+  "session.mic": "麦克风",
+  "session.micOn": "麦克风（正在发给对方）",
   "session.mouseLock": "锁定鼠标（游戏里转视角时用，Ctrl+Alt+Shift+M）",
   "session.mouseUnlock": "解除鼠标锁定（Ctrl+Alt+Shift+M，或长按 Esc）",
   "session.mouseLocked": "鼠标已锁定在画面上，长按 Esc 或按 Ctrl+Alt+Shift+M 解除",
@@ -225,6 +227,18 @@ export default {
   "sync.wasVideoLate": "原本画面晚 {ms} ms",
   "sync.audioDelayed": "已同步：声音多等 {ms} ms（{before}）",
   "sync.videoDelayed": "已同步：画面推迟 {ms} ms（{before}）",
+
+  // 麦克风：把本机的麦克风发给对方（对方电脑上是虚拟麦克风 Steam Streaming Microphone）
+  "mic.send": "把本机麦克风发给对方",
+  "mic.ready": "在对方电脑的程序里把录音设备选成 Steam Streaming Microphone（或者在那台电脑的声音设置里设为默认），就能听到你说话。只在正在查看这个连接时发送",
+  "mic.live": "正在发送：对方电脑上的 Steam Streaming Microphone 里就是你的声音",
+  "mic.noDevice": "对方电脑上没有 Steam Streaming Microphone：在那台电脑上安装 Steam，用一次 Steam 远程同乐（Remote Play），就会装上这个虚拟麦克风",
+  "mic.busy": "另一个控制端正在用对方的麦克风，它关掉之后自动换成你",
+  "mic.failed": "对方电脑打不开 Steam Streaming Microphone，正在重试：{detail}",
+  "mic.local.unsupported": "这里不能采集麦克风（需要较新的 Chrome、Edge 或 Firefox）",
+  "mic.local.denied": "没有允许使用麦克风：请在浏览器的网站设置或系统的隐私设置里允许",
+  "mic.local.noDevice": "本机没有可用的麦克风",
+  "mic.local.failed": "无法打开本机麦克风",
 
   // 快捷键
   "combo.winStart": "Win 开始菜单",

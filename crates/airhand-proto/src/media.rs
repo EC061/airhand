@@ -69,6 +69,10 @@
 //!
 //! 一个包最多 [`MAX_AUDIO_PACKET`]（带上长度前缀、单独一包放得进一个数据报），被控端的 Opus 编码器按
 //! [`MAX_OPUS_PACKET`] 限长，放不下的（只可能来自不能限长的编码器）丢掉，由解码器的丢包补偿盖过去。
+//!
+//! 控制端的麦克风（见 [`crate::session`] 的"麦克风"）走同样格式的声音数据报，方向相反：Opus 48 kHz
+//! [`MIC_CHANNELS`] 声道，每包 20 ms，采集时间是控制端的时钟（被控端只用它排先后、去掉副本）。
+//! 打开麦克风之后一直发，第一包带 `start`。
 
 use crate::session::{Codec, CursorShape, CursorVisibility};
 
@@ -88,6 +92,8 @@ pub const MAX_OPUS_PACKET: usize = MAX_AUDIO_PACKET - HEADER_LEN;
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
 pub const AUDIO_CHANNELS: u8 = 2;
 pub const AUDIO_FRAME_MS: u32 = 20;
+/// 控制端的麦克风：Opus 48 kHz 单声道，每包 20 ms（Opus 包里自己写着声道数，解码时不用知道）
+pub const MIC_CHANNELS: u8 = 1;
 
 /// 包的类型（头的第一个字节）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

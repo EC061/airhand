@@ -30,6 +30,9 @@ pub struct Established {
     pub paths: Paths,
     /// 发控制数据报（Ping、画面确认）
     pub datagrams: DatagramSender,
+    /// 麦克风的声音数据报的加密端（双方都支持 `airhand_proto::features::session::MIC` 时才用，
+    /// 见 `airhand_proto::session` 的"麦克风"）
+    pub mic: Sealer,
     /// 被控端发来的东西（被控端的探测在里面就弹回去了）
     pub receiver: HostReceiver,
     /// 直连上来的流、数据报交给这个会话
@@ -88,6 +91,7 @@ pub async fn establish(
         bulk: (bulk, secured.bulk.sealer),
         paths,
         datagrams,
+        mic: secured.audio.sealer,
         receiver,
         feed: inbox.feed,
         registration,

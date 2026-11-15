@@ -5,7 +5,7 @@
 //! 在控制通道上发的第一帧，读任务解开它时告诉会话（[`ControllerReceiver::confirmation`]），解不开就结束。
 //!
 //! Ping 和画面确认是控制数据报（`airhand_proto::session::ControllerDatagram`），在读任务里就处理掉（[`Express`]），
-//! 不排进会话的主循环：主循环可能正等着平台做一件慢事（换显示器时要等编码线程退出、建硬件编码器），这期间 Pong
+//! 控制端麦克风的声音数据报也在这里解开、交给平台的 [`MicSink`]。它们都不排进会话的主循环：主循环可能正等着平台做一件慢事（换显示器时要等编码线程退出、建硬件编码器），这期间 Pong
 //! 和确认都晚了，控制端测到的往返时延、被控端的码率控制都会把它当成网络变慢。控制端的其它消息在读任务里就换成了
 //! [`Request`]。
 //!
@@ -13,10 +13,12 @@
 //! （控制通道每一帧、Pong 也从直连发一份），直连上控制端发来的控制通道和中转上的合并（[`crate::merge`]），
 //! 画面、声音走哪条路由它按两条路上的探测决定（控制端的回声在读任务里转给它）。
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use airhand_proto::SessionLane;
+use airhand_proto::datagram;
 use airhand_proto::framing;
 use airhand_proto::handshake::{Confirm, Negotiated, PublicKey};
 use airhand_proto::session::{
@@ -31,8 +33,9 @@ use tracing::{info, warn};
 use super::Incoming;
 use super::clock::InputClock;
 use super::queue::{self, Outbox};
-use super::session::{Acks, Request};
+use super::session::{Acks, MicSink, Request};
 use super::write::{Writers, write_all};
+use crate::audio::Unbundler;
 use crate::direct;
 use crate::lanes::{Via, first_stream, open_lane};
 use crate::merge::{Merge, Policy};
@@ -118,6 +121,11 @@ impl ControllerReceiver {
         let _ = self.express.acks.set(acks);
     }
 
+    /// 控制端麦克风的声音从现在起交给 `mic`（只能设一次）。之前收到的丢掉
+    pub fn set_mic(&self, mic: Arc<dyn MicSink>) {
+        let _ = self.express.mic.set(mic);
+    }
+
     /// 多久没收到控制端的任何消息了（包括读任务自己处理掉的 Ping、确认）
     pub fn silent_for(&self) -> Duration {
         self.express.heard.lock().unwrap().elapsed()
@@ -128,11 +136,13 @@ impl ControllerReceiver {
 ///
 /// * Ping：马上回 Pong。同意之前也回：控制端不会把等待当成失联；
 /// * 画面确认：马上交给平台的 [`Acks`]；
+/// * 控制端麦克风的声音包：马上交给平台的 [`MicSink`]；
 /// * 任何消息都记下收到的时刻，会话据此发现失联（[`super::PEER_TIMEOUT`]）。
 #[derive(Clone)]
 pub(crate) struct Express {
     pong: Arc<dyn Fn(u64) + Send + Sync>,
     acks: Arc<OnceLock<Arc<dyn Acks>>>,
+    mic: Arc<OnceLock<Arc<dyn MicSink>>>,
     /// 上次收到控制端消息的时刻（tokio 的时钟：测试里可以拨）
     heard: Arc<Mutex<tokio::time::Instant>>,
 }
@@ -143,7 +153,15 @@ impl Express {
         Self {
             pong: Arc::new(pong),
             acks: Arc::default(),
+            mic: Arc::default(),
             heard: Arc::new(Mutex::new(tokio::time::Instant::now())),
+        }
+    }
+
+    /// 控制端麦克风的一个声音包（还没有人收时丢掉）
+    pub(crate) fn mic(&self, packet: Vec<u8>) {
+        if let Some(m) = self.mic.get() {
+            m.packet(packet);
         }
     }
 
@@ -188,6 +206,7 @@ pub(crate) fn request(m: ControllerMsg) -> Option<Request> {
         }
         ControllerMsg::Clipboard { text } => Request::Clipboard(text),
         ControllerMsg::Audio { enabled } => Request::Audio(enabled),
+        ControllerMsg::Mic { enabled } => Request::Mic(enabled),
         ControllerMsg::Direct(_) => return None,
     })
 }
@@ -333,6 +352,7 @@ impl HostStreams {
             control,
             bulk,
             datagrams: (inbox.datagrams, secured.datagrams.opener),
+            mic: (inbox.audio, secured.audio.opener),
             express,
             confirm: confirm_tx,
             control_tx,
@@ -411,6 +431,8 @@ struct Readers {
     bulk: Merge,
     /// 控制数据报（Ping、确认、回声）：从哪条路来、整个数据报，和它们的解密端
     datagrams: (mpsc::Receiver<(Via, Bytes)>, Opener),
+    /// 控制端麦克风的声音数据报（整个数据报，还是密文）和它们的解密端
+    mic: (mpsc::Receiver<Bytes>, Opener),
     express: Express,
     /// 解开了控制端的确认
     confirm: oneshot::Sender<()>,
@@ -422,15 +444,16 @@ struct Readers {
     echoes: mpsc::Sender<(Via, u64)>,
 }
 
-/// 读控制端的控制通道（第一帧是确认）、大块通道和控制数据报：Ping、确认就地处理（[`Express`]），
-/// 直连的回答、探测的回声交给直连任务，其它的换成请求交给会话。三样各读各的：会话的主循环慢了（请求的信箱满了），
-/// Pong 和确认照样不等
+/// 读控制端的控制通道（第一帧是确认）、大块通道、控制数据报和声音数据报：Ping、确认、麦克风的声音就地处理
+/// （[`Express`]），直连的回答、探测的回声交给直连任务，其它的换成请求交给会话。四样各读各的：会话的主循环慢了
+/// （请求的信箱满了），Pong、确认和声音照样不等
 async fn read_all(r: Readers) -> Result<()> {
     let Readers {
         session_id,
         mut control,
         mut bulk,
         datagrams: (mut datagrams, mut opener),
+        mic: (mut mic_rx, mut mic_opener),
         express,
         confirm,
         control_tx,
@@ -456,6 +479,27 @@ async fn read_all(r: Readers) -> Result<()> {
                 ControllerDatagram::Ack { .. } => {}
             }
             express.datagram(m);
+        }
+        std::future::pending::<Result<()>>().await
+    };
+    // 控制端的麦克风：解开、拆出没收过的包（副本、迟到的去掉，见 crate::audio），一个一个交给平台。
+    // 解不开的（被改过、重放的）整个丢掉
+    let mic = async {
+        let mut unbundler = Unbundler::default();
+        let mut packets = VecDeque::new();
+        while let Some(d) = mic_rx.recv().await {
+            let Some(sealed) = d.get(datagram::HEADER..) else {
+                continue;
+            };
+            let mut plain = sealed.to_vec();
+            if mic_opener.open(&mut plain).is_err() {
+                continue;
+            }
+            express.heard();
+            unbundler.unbundle(&plain, &mut packets);
+            for p in packets.drain(..) {
+                express.mic(p);
+            }
         }
         std::future::pending::<Result<()>>().await
     };
@@ -519,6 +563,7 @@ async fn read_all(r: Readers) -> Result<()> {
         r = control => r,
         r = bulk => r,
         r = dgrams => r,
+        r = mic => r,
     }
 }
 
@@ -587,6 +632,10 @@ mod tests {
             request(ControllerMsg::RequestKeyframe { after: 7 }),
             Some(Request::Keyframe(Some(7)))
         );
+        assert_eq!(
+            request(ControllerMsg::Mic { enabled: true }),
+            Some(Request::Mic(true))
+        );
         let wild = QualitySettings {
             fps: 0,
             ..QualitySettings::default()
@@ -638,6 +687,95 @@ mod tests {
         assert_eq!(incoming.silent_for(), Duration::ZERO);
     }
 
+    /// 控制端麦克风的声音数据报：读任务解开、去掉副本，一包一包按先后交给平台；丢了的从下一个数据报里补上。
+    /// 解不开的、重放的丢掉；平台还没设好接收时收到的也丢掉
+    #[tokio::test]
+    async fn mic_datagrams_reach_the_platform_once_each() {
+        use crate::audio::Bundler;
+        use crate::secure::test_lane;
+        use airhand_proto::media::{self, AudioHeader};
+
+        struct Sink(Arc<Mutex<Vec<u32>>>);
+        impl MicSink for Sink {
+            fn packet(&self, p: Vec<u8>) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(AudioHeader::decode(&p).unwrap().seq);
+            }
+        }
+
+        // 控制通道一直没有流：读任务只处理数据报
+        let (_control_streams, frames) = mpsc::unbounded_channel();
+        let control = Merge::new(
+            SessionLane::Control,
+            Policy::Complete,
+            test_lane(true).1,
+            frames,
+        );
+        let (_bulk_streams, frames) = mpsc::unbounded_channel();
+        let bulk = Merge::new(
+            SessionLane::Bulk,
+            Policy::Complete,
+            test_lane(true).1,
+            frames,
+        );
+        let (mic_tx, mic_rx) = mpsc::channel(16);
+        let (_dgram_tx, dgram_rx) = mpsc::channel(1);
+        let express = Express::new(|_| {});
+        let reader = tokio::spawn(read_all(Readers {
+            session_id: 1,
+            control,
+            bulk,
+            datagrams: (dgram_rx, test_lane(false).1),
+            mic: (mic_rx, test_lane(false).1),
+            express: express.clone(),
+            confirm: oneshot::channel().0,
+            control_tx: mpsc::channel(1).0,
+            bulk_tx: mpsc::channel(1).0,
+            answers: mpsc::channel(1).0,
+            echoes: mpsc::channel(1).0,
+        }));
+        let (mut sealer, _) = test_lane(false);
+        let mut bundler = Bundler::default();
+        let mut sealed = |seq: u32| {
+            let h = AudioHeader {
+                seq,
+                start: seq == 1,
+                capture_us: seq as u64 * 20_000,
+            };
+            let plain = bundler
+                .bundle(Bytes::from(media::frame(&h.encode(), &[&[seq as u8; 50]])))
+                .unwrap();
+            Bytes::from(sealer.seal_datagram(1, datagram::AUDIO, &plain).unwrap())
+        };
+        let settle = || async {
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+        };
+
+        // 平台还没接上：丢掉
+        mic_tx.send(sealed(1)).await.unwrap();
+        settle().await;
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let receiver = ControllerReceiver::new(
+            mpsc::channel(1).1,
+            mpsc::channel(1).1,
+            oneshot::channel().1,
+            express.clone(),
+        );
+        receiver.set_mic(Arc::new(Sink(got.clone())));
+        // 第 3 个数据报丢了；一个伪造的、一个重放的
+        let (d2, _d3, d4) = (sealed(2), sealed(3), sealed(4));
+        for d in [d2, Bytes::from(vec![0u8; 60]), d4.clone(), d4] {
+            mic_tx.send(d).await.unwrap();
+        }
+        settle().await;
+        assert_eq!(*got.lock().unwrap(), [2, 3, 4]);
+        reader.abort();
+    }
+
     /// 读任务：控制通道上的第一帧必须是确认，解得开才告诉会话；之后的消息照常
     #[tokio::test]
     async fn the_first_control_frame_must_be_the_confirmation() {
@@ -676,11 +814,13 @@ mod tests {
             let (control_tx, mut control_rx) = mpsc::channel(4);
             let (confirm, mut confirmed) = oneshot::channel();
             let (_dgram_tx, dgram_rx) = mpsc::channel(1);
+            let (_mic_tx, mic_rx) = mpsc::channel(1);
             let reader = tokio::spawn(read_all(Readers {
                 session_id: 1,
                 control,
                 bulk,
                 datagrams: (dgram_rx, test_lane(false).1),
+                mic: (mic_rx, test_lane(false).1),
                 express: Express::new(|_| {}),
                 confirm,
                 control_tx,

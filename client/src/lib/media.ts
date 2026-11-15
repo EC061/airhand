@@ -108,3 +108,29 @@ export function cursorHeader(dv: DataView): CursorHeader {
 export function videoSeq(dv: DataView): number | null {
   return kind(dv) === VIDEO ? dv.getUint32(4, true) : null;
 }
+
+/** 打一个声音包（头 + Opus 包）：本机麦克风的声音（被控端的声音包也是这个格式，见 Rust 的 AudioHeader::encode） */
+export function audioPacket(h: AudioHeader, opus: Uint8Array): Uint8Array {
+  const pkt = new Uint8Array(HEADER_LEN + opus.byteLength);
+  const dv = new DataView(pkt.buffer);
+  dv.setUint8(0, AUDIO);
+  dv.setUint8(1, h.start ? 1 : 0);
+  dv.setUint8(3, HEADER_LEN);
+  dv.setUint32(4, h.seq >>> 0, true);
+  dv.setBigUint64(16, BigInt(Math.max(0, Math.round(h.captureUs))), true);
+  pkt.set(opus, HEADER_LEN);
+  return pkt;
+}
+
+/**
+ * 发给控制端服务的麦克风声音包：`2 | sid u32 LE | 声音包`（crates/airhand-link/src/console.rs 的 parse_mic），
+ * 每 20 ms 一个，和画面确认一样不走 JSON
+ */
+export function micMessage(sid: number, packet: Uint8Array): ArrayBuffer {
+  const buf = new ArrayBuffer(5 + packet.byteLength);
+  const dv = new DataView(buf);
+  dv.setUint8(0, 2);
+  dv.setUint32(1, sid, true);
+  new Uint8Array(buf, 5).set(packet);
+  return buf;
+}

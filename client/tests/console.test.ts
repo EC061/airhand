@@ -136,6 +136,7 @@ function workerHarness() {
   const posted: { m: any; transfer: unknown[] }[] = [];
   const sockets: any[] = [];
   const players: any[] = [];
+  const mics: any[] = [];
   const self: any = { postMessage: (m: any, o: { transfer: unknown[] }) => posted.push({ m, transfer: o.transfer }) };
   class FakeSocket {
     static OPEN = 1;
@@ -158,6 +159,13 @@ function workerHarness() {
     WebSocket: FakeSocket,
     AckCoalescer, ackMessage, AvSync, media,
     AudioStream: class { push() {} reset() {} setPort() {} setExtraDelay() {} },
+    // 麦克风的编码器：测试直接拿它的输出回调，当作编好了一包
+    MicEncoder: class {
+      out: (pkt: Uint8Array) => void;
+      ports: unknown[] = [];
+      constructor(out: (pkt: Uint8Array) => void) { this.out = out; mics.push(this); }
+      setPort(p: unknown) { this.ports.push(p); }
+    },
     VideoPlayer: class {
       decodeAvg = 0;
       pushed: number[] = [];
@@ -175,7 +183,7 @@ function workerHarness() {
   };
   load("console-worker.ts", sandbox, []);
   const toWorker = (m: unknown) => self.onmessage({ data: m });
-  return { posted, sockets, players, toWorker };
+  return { posted, sockets, players, mics, toWorker };
 }
 
 /** `ch | 媒体包`（头 24 字节 + 负载） */
@@ -299,6 +307,34 @@ test("Worker：显示方式交给画面；报给主线程的是画面的大小�
   assert.equal(player.disposed, 1);
   w.toWorker({ t: "layout", id: 1, area: null, enhance: "off" });
   assert.equal(player.layouts.length, 1, "画面已经不在了");
+});
+
+test("Worker：本机麦克风编好的声音包按会话的 sid 发给控制端服务（还不知道 sid 时丢掉），端口交给编码器", () => {
+  const w = workerHarness();
+  w.toWorker({ t: "open", url: "ws://x" });
+  const ws = w.sockets[0];
+  ws.readyState = 1;
+  w.toWorker({ t: "view", id: 1, canvas: { width: 16, height: 9, getContext: () => ({}) } });
+  const mic = w.mics[0];
+  const port = { close() {} };
+  w.toWorker({ t: "mic", id: 1, port });
+  assert.deepEqual(mic.ports, [port]);
+  const pkt = Uint8Array.of(3, 1, 0, 24);
+  mic.out(pkt);
+  assert.deepEqual(acks(ws), [], "还没连上");
+  w.toWorker({ t: "bind", ch: 3, id: 1 });
+  mic.out(pkt);
+  assert.deepEqual(acks(ws), [], "还不知道 sid");
+  w.toWorker({ t: "sid", ch: 3, sid: 5 });
+  mic.out(pkt);
+  assert.deepEqual(acks(ws), [[...new Uint8Array(media.micMessage(5, pkt))]]);
+  // 画面不要了：编码器也停下
+  w.toWorker({ t: "drop", id: 1 });
+  assert.deepEqual(mic.ports, [port, null]);
+  // 没有这个画面了：交过来的端口关掉
+  let closed = false;
+  w.toWorker({ t: "mic", id: 1, port: { close() { closed = true; } } });
+  assert.ok(closed);
 });
 
 test("Worker：发不出去的积压太多就断开", () => {

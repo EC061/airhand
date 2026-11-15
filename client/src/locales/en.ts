@@ -168,6 +168,8 @@ const en: Record<MsgKey, Msg> = {
   "session.playSound": "Play remote sound",
   "session.avSync": "A/V sync",
   "session.avSyncHint": "Video waits for the sound. Good for watching videos, but input feels slower",
+  "session.mic": "Microphone",
+  "session.micOn": "Microphone (sending to the remote computer)",
   "session.mouseLock": "Lock the mouse (for turning the camera in games, Ctrl+Alt+Shift+M)",
   "session.mouseUnlock": "Unlock the mouse (Ctrl+Alt+Shift+M, or hold Esc)",
   "session.mouseLocked": "The mouse is locked to the picture. Hold Esc or press Ctrl+Alt+Shift+M to unlock",
@@ -215,6 +217,18 @@ const en: Record<MsgKey, Msg> = {
   "sync.wasVideoLate": "video was {ms} ms behind",
   "sync.audioDelayed": "Synced: sound held back {ms} ms ({before})",
   "sync.videoDelayed": "Synced: video held back {ms} ms ({before})",
+
+  // Microphone: this computer's microphone goes to the virtual microphone on the remote computer
+  "mic.send": "Send this computer's microphone",
+  "mic.ready": "Choose Steam Streaming Microphone as the recording device in programs on the remote computer (or make it the default in its sound settings) and they'll hear you. Only sent while you're viewing this connection",
+  "mic.live": "Sending: Steam Streaming Microphone on the remote computer carries your voice",
+  "mic.noDevice": "The remote computer doesn't have Steam Streaming Microphone: install Steam there and use Steam Remote Play once to get this virtual microphone",
+  "mic.busy": "Another controller is using the remote microphone. You'll take over when it stops",
+  "mic.failed": "The remote computer can't open Steam Streaming Microphone, retrying: {detail}",
+  "mic.local.unsupported": "The microphone can't be captured here (use a recent Chrome, Edge or Firefox)",
+  "mic.local.denied": "Microphone access isn't allowed: allow it in your browser's site settings or your system's privacy settings",
+  "mic.local.noDevice": "This computer has no microphone",
+  "mic.local.failed": "Can't open this computer's microphone",
 
   "combo.winStart": "Start menu (Win)",
   "combo.altTab": "Switch windows (Alt + Tab)",

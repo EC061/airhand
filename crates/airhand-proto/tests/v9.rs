@@ -154,6 +154,27 @@ fn session_messages_keep_their_wire_encoding() {
     );
 }
 
+/// 会话能力位 MIC（0 号位）加的消息：发布之后一样固定。没有说明时 detail 不写（数组短一项）
+#[test]
+fn mic_messages_keep_their_wire_encoding() {
+    assert_eq!(airhand_proto::features::session::MIC.bits(), 1);
+    golden(
+        HostMsg::Mic {
+            state: MicState::Ready,
+            detail: None,
+        },
+        "820c8102",
+    );
+    golden(
+        HostMsg::Mic {
+            state: MicState::Failed,
+            detail: Some("x".into()),
+        },
+        "820c82046178",
+    );
+    golden(ControllerMsg::Mic { enabled: true }, "820a81f5");
+}
+
 #[test]
 fn handshake_messages_keep_their_wire_encoding() {
     golden(

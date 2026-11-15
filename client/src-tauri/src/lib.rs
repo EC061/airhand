@@ -41,6 +41,7 @@ use std::time::Duration;
 use airhand_link::secure::Identity;
 use airhand_link::{Problem, ServerState};
 use serde::Serialize;
+use tauri::webview::{PermissionKind, PermissionResponse};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tracing::{info, warn};
 
@@ -565,6 +566,12 @@ pub fn run() {
             webview_dirs: Mutex::default(),
             service_mode,
             console: Default::default(),
+        })
+        // 控制台的麦克风（把本机的麦克风发给对方，见 client/src/lib/mic.ts）：用户在连接里打开了才会用到，
+        // 直接允许，不再弹 WebView 自己的询问（控制台的数据目录是临时的，不然每次打开控制台都要问一遍）
+        .on_permission_request(|_, kind| match kind {
+            PermissionKind::Microphone => PermissionResponse::Allow,
+            _ => PermissionResponse::Default,
         })
         .invoke_handler(tauri::generate_handler![
             console_url,

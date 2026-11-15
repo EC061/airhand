@@ -198,6 +198,8 @@ impl Platform for Phone {
                     .subscribe(self.id, self.audio.clone(), self.out.clone())
             }
             Request::Audio(false) => sh.audio.unsubscribe(self.id),
+            // 手机不接控制端的麦克风：没有 Platform::mic，也不发 HostMsg::Mic，控制端不会显示麦克风
+            Request::Mic(_) => {}
         }
         Ok(())
     }

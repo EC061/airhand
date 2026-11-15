@@ -35,6 +35,8 @@ export interface MediaView {
   setSync(on: boolean): void;
   /** 声音输出：音频线程的端口（见 audio.ts）；null = 不播放 */
   setAudio(port: MessagePort | null): void;
+  /** 本机麦克风：采集它的音频线程的端口（见 mic.ts），Worker 编码之后发给被控端；null = 不发 */
+  setMic(port: MessagePort | null): void;
   /** 声音时钟（见 avsync.ts）：`localMs` 是主线程 performance.now() 的时基 */
   audioClock(hostUs: number, localMs: number, appliedMs: number): void;
   /** 请被控端编一个关键帧（例如刚切回这个会话）。和解码出错时 Worker 自己要的一起限流 */
@@ -298,6 +300,7 @@ export class ConsoleLink {
       id,
       setSync: (on) => this.post({ t: "sync", id, on }),
       setAudio: (port) => this.post({ t: "audio", id, port }, port ? [port] : []),
+      setMic: (port) => this.post({ t: "mic", id, port }, port ? [port] : []),
       // Worker 的 performance.now() 从它自己创建时算起：换成绝对时间交过去
       audioClock: (hostUs, localMs, appliedMs) =>
         this.post({ t: "clock", id, hostUs, at: performance.timeOrigin + localMs, appliedMs }),

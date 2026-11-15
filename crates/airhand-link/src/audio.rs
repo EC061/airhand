@@ -1,6 +1,7 @@
-//! 声音数据报的冗余（格式见 `airhand_proto::media` 的"声音数据报"）：被控端每个数据报带上之前几包的副本
-//! （[`Bundler`]），控制端拆开、按采集时刻只留没收过的（[`Unbundler`]）。丢了的包这样就补回来了，不用等重传；
-//! 乱序到的数据报也一样：晚到的那包在后一个数据报里已经有了。
+//! 声音数据报的冗余（格式见 `airhand_proto::media` 的"声音数据报"）：发的一方每个数据报带上之前几包的副本
+//! （[`Bundler`]），收的一方拆开、按采集时刻只留没收过的（[`Unbundler`]）。丢了的包这样就补回来了，不用等重传；
+//! 乱序到的数据报也一样：晚到的那包在后一个数据报里已经有了。被控端的系统声音（被控端发、控制端收）和
+//! 控制端的麦克风（控制端发、被控端收）都这样。
 
 use std::collections::VecDeque;
 
@@ -13,7 +14,7 @@ use bytes::Bytes;
 /// 一包 Opus 约 240 字节，一个数据报三包约 0.8 KB，每秒 50 个约 40 KB（320 kbps），和画面比可以忽略
 pub(crate) const REDUNDANCY: usize = 2;
 
-/// 被控端：拼声音数据报的明文（一个会话一个）
+/// 发的一方：拼声音数据报的明文（一个会话一个）
 #[derive(Default)]
 pub(crate) struct Bundler {
     /// 最近发出去的包（不带长度前缀），从新到旧
@@ -24,7 +25,11 @@ impl Bundler {
     /// 这一包（[`media::frame`] 编好的，带长度前缀）连同之前几包的副本：要加密发出去的数据报明文。
     /// 单独一包都放不进一个数据报（[`media::MAX_AUDIO_PACKET`]）时为 `None`，这一包丢掉
     pub fn bundle(&mut self, framed: Bytes) -> Option<Vec<u8>> {
-        let packet = framed.slice(framing::PREFIX.min(framed.len())..);
+        self.bundle_packet(framed.slice(framing::PREFIX.min(framed.len())..))
+    }
+
+    /// 同 [`Bundler::bundle`]，这一包不带长度前缀（控制端的麦克风：界面打好的包）
+    pub fn bundle_packet(&mut self, packet: Bytes) -> Option<Vec<u8>> {
         // 静音之后的第一包：之前的那几包是上一段声音的，补过去就是在新的声音前面放一段过时的
         if AudioHeader::decode(&packet).is_none_or(|h| h.start) {
             self.recent.clear();
@@ -36,7 +41,7 @@ impl Bundler {
     }
 }
 
-/// 控制端：拆开声音数据报的明文（一个会话一个）
+/// 收的一方：拆开声音数据报的明文（一个会话一个）
 #[derive(Default)]
 pub(crate) struct Unbundler {
     order: AudioOrder,

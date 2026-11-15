@@ -10,6 +10,7 @@
 // * 画面只缩放一次：按画面在窗口里显示的大小请求分辨率，收到后按 1:1 显示（见 fit.ts）；
 // * 画面增强（可选）：要放大时在 Worker 里用显卡放大、锐化，canvas 就是显示的大小（见 enhance.ts）；
 // * 只有当前正在查看的会话播放声音，其余会话通知被控端停止采集声音；
+// * 本机麦克风（可选，默认关）：也只发给当前正在查看的会话，被控端放进它的虚拟麦克风（见 mic.ts）；
 // * 音画同步（可选）：按采集时间把画面推迟到与声音对齐后再解码显示，见 avsync.ts（也在 Worker 里）。
 import {
   api,
@@ -22,11 +23,13 @@ import {
   type QualitySettings,
   type ResumeToken,
   type SessionEvent,
+  type MicState,
   type Platform,
   type SystemAction,
 } from "./api";
 import * as media from "./media";
 import { AudioOutput } from "./audio";
+import { MicCapture, type MicError } from "./mic";
 import { ConnectionAttempt } from "./connection-attempt";
 import { RemoteInput } from "./input";
 import type { AvSyncStats } from "./avsync";
@@ -117,6 +120,14 @@ export class RemoteSession {
   audioEnabled = true;
   /** 音画同步开关（用户设置；实际只在播放声音时生效） */
   avSync = false;
+  /** 对方能不能接本机的麦克风（hello 之后对方会说）；对方的版本旧、还没说时为 null：不显示麦克风 */
+  micState: MicState | null = null;
+  /** 对方打不开虚拟麦克风的原因（英文技术信息） */
+  micDetail: string | null = null;
+  /** 把本机麦克风发给对方（用户开关，默认关；实际只在当前查看的会话上发） */
+  micEnabled = false;
+  /** 本机采集不了麦克风的原因（用户再打开时清掉） */
+  micError: MicError | null = null;
   /** 音画同步统计（约每秒更新） */
   syncStats: AvSyncStats = { skewMs: null, videoDelayMs: 0, extraMs: 0 };
   retries = 0;
@@ -159,9 +170,15 @@ export class RemoteSession {
 
   // 声音：解码在 Worker 里，解出来的直接交给音频线程
   readonly audio = new AudioOutput((port) => this.view.setAudio(port));
+  // 麦克风：音频线程采集到的直接交给 Worker 编码、发出去
+  private readonly mic = new MicCapture((port) => this.view.setMic(port));
   private foreground = false;
   /** 当前是否已让被控端发送声音 */
   private audioOn = false;
+  /** 当前是否已让被控端打开麦克风 */
+  private micOn = false;
+  /** 在采集本机的麦克风（打开中也算） */
+  private micCapturing = false;
   /** 音画同步是否生效 */
   private syncOn = false;
 
@@ -245,6 +262,8 @@ export class RemoteSession {
       this.notice = { kind: "noOpus" };
       this.emit();
     };
+    // 本机的麦克风没了（拔掉了）：关掉，再打开时重新找
+    this.mic.onEnded = () => this.micFailed("noDevice");
   }
 
   // ───────────────────────── 订阅 ─────────────────────────
@@ -274,6 +293,10 @@ export class RemoteSession {
     // 在连接之前清掉旧提示：被控端紧跟在 Hello 后面发的提示可能比 connect 的返回值先到
     this.notice = null;
     this.audioError = null;
+    // 新的会话：对方在 hello 之后重新说它能不能接麦克风，打开了的话那时再告诉它
+    this.micState = null;
+    this.micDetail = null;
+    this.micOn = false;
     this.attemptAt = performance.now();
     let info;
     // 开始时的画质和要不要声音在端到端握手里就告诉对方：它一开始就按这个建编码器，不用先建一个默认的再重建
@@ -370,6 +393,7 @@ export class RemoteSession {
     if (this.disposed) return;
     this.sid = null;
     this.syncAudio();
+    this.syncMic();
     this.closedReason = reason;
     clearTimeout(this.retryTimer);
     const kind = reason?.kind;
@@ -450,6 +474,7 @@ export class RemoteSession {
     this.sid = null;
     this.state = "closed";
     this.audio.disable();
+    this.syncMic();
     this.detach();
     this.emit();
   }
@@ -494,6 +519,11 @@ export class RemoteSession {
       case "encoder":
         this.encoder = { codec: ev.codec, name: ev.name, hardware: ev.hardware, width: ev.width, height: ev.height };
         break;
+      case "mic":
+        this.micState = ev.state;
+        this.micDetail = ev.detail;
+        this.syncMic();
+        break;
       case "notice": {
         const n = ev.notice;
         if (n.kind === "captureRecovered" || n.kind === "audioRecovered") {
@@ -526,6 +556,7 @@ export class RemoteSession {
           // 对方主动断开：不自动重连
           this.sid = null;
           this.syncAudio();
+          this.syncMic();
           this.closedReason = ev.reason;
           // 对方换了控制码 / 断开了所有控制端：凭证作废了（断开所有控制端时对方换了密钥），
           // 之后手动重连就是普通的连接请求
@@ -773,11 +804,57 @@ export class RemoteSession {
     if (v) this.view.requestKeyframe();
   }
 
-  /** 是否为当前正在查看的会话（只有它播放声音） */
+  /** 是否为当前正在查看的会话（只有它播放声音、只有它收本机的麦克风） */
   setForeground(v: boolean) {
     if (this.foreground === v) return;
     this.foreground = v;
     this.syncAudio();
+    this.syncMic();
+  }
+
+  /** 把本机麦克风发给对方（第一次打开时浏览器会问能不能用麦克风） */
+  setMicEnabled(v: boolean) {
+    this.micEnabled = v;
+    if (v) this.micError = null;
+    this.syncMic();
+    this.emit();
+  }
+
+  /** 正在把本机麦克风发给对方 */
+  get micLive(): boolean {
+    return this.micCapturing && this.micState === "ready";
+  }
+
+  /**
+   * 麦克风：开关打开、正在查看这个会话、对方能接（不是 unsupported）时告诉对方打开（对方没有设备、别人占着的时候
+   * 它会一直等着，能用了自动接上）；对方说 ready 时才采集本机的麦克风。不满足了就停止采集、告诉对方关掉（放开设备）
+   */
+  private syncMic() {
+    const want =
+      this.micEnabled && this.foreground && this.sid !== null && !this.disposed
+      && this.micState !== null && this.micState !== "unsupported";
+    if (want !== this.micOn && this.sid !== null) this.command({ cmd: "mic", sid: this.sid, enabled: want });
+    this.micOn = want;
+    const capture = want && this.micState === "ready";
+    if (capture === this.micCapturing) return;
+    this.micCapturing = capture;
+    if (!capture) {
+      this.mic.stop();
+      return;
+    }
+    this.mic.start().catch((e: unknown) => {
+      if (this.micCapturing) this.micFailed(typeof e === "string" ? (e as MicError) : "failed");
+    });
+  }
+
+  /** 本机采集不了麦克风：关掉开关（原因显示在麦克风的菜单里），用户再打开时重试 */
+  private micFailed(e: MicError) {
+    this.micCapturing = false;
+    this.mic.stop();
+    this.micError = e;
+    this.micEnabled = false;
+    this.syncMic();
+    this.emit();
   }
 
   setAudioEnabled(v: boolean) {

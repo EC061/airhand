@@ -3,12 +3,14 @@
 //
 // 协议见 crates/airhand-link/src/console.rs。文本消息原样交给主线程；二进制是 `ch u32 LE | 媒体包`（media.ts），
 // 按 ch 交给会话的画面（View）：画面一到就确认（ack.ts）再解码，声音解码后直接交给音频线程，光标交给主线程（它要改 CSS）。
+// 本机麦克风的声音从音频线程直接送到这里（mic-encoder.ts），编码之后发给控制端服务（二进制，见 media.ts 的 micMessage）。
 import { AckCoalescer, ackMessage } from "./ack";
 import type { Codec } from "./api";
 import { AudioStream } from "./audio-decoder";
 import { AvSync, type AvSyncStats } from "./avsync";
 import type { Area, EnhanceLevel } from "./enhance";
 import * as media from "./media";
+import { MicEncoder } from "./mic-encoder";
 import { VideoPlayer } from "./video";
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -36,6 +38,8 @@ export type ToWorker =
   | { t: "sync"; id: number; on: boolean }
   /** 声音输出（音频线程的端口，见 audio.ts）；null = 不播放 */
   | { t: "audio"; id: number; port: MessagePort | null }
+  /** 本机麦克风（采集它的音频线程的端口，见 mic.ts）；null = 不发 */
+  | { t: "mic"; id: number; port: MessagePort | null }
   /** 声音时钟：被控端 hostUs 采集的声音在 at（performance.timeOrigin 时基的绝对时间，毫秒）被听到 */
   | { t: "clock"; id: number; hostUs: number; at: number; appliedMs: number }
   /** 主线程要关键帧（例如刚切回这个会话） */
@@ -79,6 +83,11 @@ class View {
   readonly id: number;
   readonly sync = new AvSync();
   readonly audio = new AudioStream();
+  /** 本机麦克风：编好的声音包发给控制端服务（还没连上、不知道 sid 时丢掉） */
+  readonly mic = new MicEncoder((pkt) => {
+    const sid = this.chan?.sid;
+    if (sid != null) send(media.micMessage(sid, pkt));
+  });
   readonly video: VideoPlayer;
   /** 现在显示的连接 */
   chan: Chan | null = null;
@@ -242,7 +251,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
   }
   const view = views.get(m.id);
   if (!view) {
-    if (m.t === "audio") m.port?.close();
+    if (m.t === "audio" || m.t === "mic") m.port?.close();
     return;
   }
   switch (m.t) {
@@ -250,6 +259,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
       if (view.chan) unbind(view.chan.ch);
       view.video.dispose();
       view.audio.setPort(null);
+      view.mic.setPort(null);
       views.delete(m.id);
       return;
     case "sync":
@@ -260,6 +270,9 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
       return;
     case "audio":
       view.audio.setPort(m.port);
+      return;
+    case "mic":
+      view.mic.setPort(m.port);
       return;
     case "clock":
       view.sync.onAudioClock(m.hostUs, m.at - performance.timeOrigin, m.appliedMs);

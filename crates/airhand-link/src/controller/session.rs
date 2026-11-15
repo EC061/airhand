@@ -1,4 +1,5 @@
-//! 控制端的单个会话：把画面、声音原样转交给界面（界面自己解码），转发输入与设置。
+//! 控制端的单个会话：把画面、声音原样转交给界面（界面自己解码），转发输入与设置，
+//! 把界面打好的麦克风声音包发成声音数据报。
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -6,13 +7,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::receiver::{FromHost, HostReceiver};
+use crate::audio::Bundler;
 use crate::paths::{DatagramSender, Paths};
 use crate::secure::{Negotiated, Sealer};
 use crate::transport::write_lane;
+use airhand_proto::datagram;
 use airhand_proto::media::{self, VideoHeader};
 use airhand_proto::session::{
-    ByeReason, Codec, ControllerDatagram, ControllerMsg, DirectOffer, DisplayInfo, HostMsg, Notice,
-    Platform, SystemAction,
+    ByeReason, Codec, ControllerDatagram, ControllerMsg, DirectOffer, DisplayInfo, HostMsg,
+    MicState, Notice, Platform, SystemAction,
 };
 use anyhow::Result;
 use bytes::Bytes;
@@ -214,6 +217,12 @@ pub enum SessionEvent {
     Notice { notice: NoticeView },
     /// 被控端复制了文本（只发给浏览器，见 [`super::Frontend::Browser`]；桌面版直接写入本机剪贴板）
     Clipboard { text: String },
+    /// 被控端现在能不能接本机的麦克风（见 [`super`] 的"麦克风"）：会话开始时一次，之后有变化再来。
+    /// 被控端不支持（版本旧）时不会有。`detail`：出错时给排查问题用的技术信息（英文）
+    Mic {
+        state: MicState,
+        detail: Option<String>,
+    },
     /// `retry=false` 表示对方主动断开，不应自动重连
     Closed { reason: Problem, retry: bool },
 }
@@ -342,6 +351,8 @@ pub(super) struct SessionIo {
     pub paths: Paths,
     /// 直连任务
     pub direct: Direct,
+    /// 麦克风：会话 ID、界面交过来的声音包、声音数据报的加密端
+    pub mic: (u64, mpsc::Receiver<Bytes>, Sealer),
 }
 
 /// 会话的直连任务（[`crate::direct::controller`]）：被控端发来的候选地址交给它
@@ -382,7 +393,11 @@ pub(super) async fn run(
             offers,
             task: direct_task,
         },
+        mic: (session_id, mut mic_rx, mut mic_sealer),
     } = io;
+    let mic_paths = paths.clone();
+    // 画面最近是从直连来的：麦克风的声音也走直连（被控端按两条路的时延选的，见 crate::direct）
+    let video_direct = Arc::new(AtomicBool::new(false));
     info!(sid, ?negotiated, "session started");
     let local_clip = match mode {
         Mode::Desktop { clip, enabled } => Some((clip, enabled)),
@@ -412,6 +427,7 @@ pub(super) async fn run(
     let clip_in = local_clip.clone();
     let keyframe_tx = tx.clone();
     let acker = feedback.clone();
+    let on_direct = video_direct.clone();
     let reader = async move {
         let mut cursor = super::cursor::CursorReceiver::default();
         let mut keyframes = Keyframes::default();
@@ -441,6 +457,7 @@ pub(super) async fn run(
                         s.h = h.height;
                         s.direct = direct;
                     }
+                    on_direct.store(direct, Ordering::Relaxed);
                     if !keyframes.admit(gap, h.key) {
                         // 解不了的增量帧不交给界面，这里替它确认：不然被控端的在途窗口停住，关键帧也发不过来
                         acker.ack(h.seq, arrived);
@@ -542,6 +559,15 @@ pub(super) async fn run(
                 HostMsg::Direct(offer) => {
                     let _ = offers.try_send(offer);
                 }
+                HostMsg::Mic { state, detail } => {
+                    // 对方版本新增的状态：不知道能不能接，当作不支持（界面不显示麦克风）
+                    let state = if state.is_known() {
+                        state
+                    } else {
+                        MicState::Unsupported
+                    };
+                    let _ = out.event(SessionEvent::Mic { state, detail });
+                }
             }
         }
         #[allow(unreachable_code)]
@@ -617,12 +643,39 @@ pub(super) async fn run(
         direct_task.await;
         std::future::pending::<()>().await
     };
+    // 麦克风：界面打好的声音包带上之前几包的副本（见 crate::audio），加密之后发成数据报。
+    // 和画面走同一条路；丢了就丢了（下一个数据报里有副本）
+    let mic = async move {
+        let mut bundler = Bundler::default();
+        while let Some(packet) = mic_rx.recv().await {
+            let Some(plain) = bundler.bundle_packet(packet) else {
+                continue;
+            };
+            let d = match mic_sealer.seal_datagram(session_id, datagram::AUDIO, &plain) {
+                Ok(d) => Bytes::from(d),
+                Err(e) => {
+                    debug!(sid, "can't seal a microphone packet: {e:#}");
+                    continue;
+                }
+            };
+            let direct = video_direct
+                .load(Ordering::Relaxed)
+                .then(|| mic_paths.direct())
+                .flatten();
+            let conn = direct.as_ref().unwrap_or(mic_paths.relay());
+            if let Err(e) = conn.send_datagram(d) {
+                debug!(sid, "dropped a microphone packet: {e}");
+            }
+        }
+        std::future::pending::<()>().await
+    };
     let result: Result<()> = tokio::select! {
         r = reader => r,
         r = ticker => r,
         _ = repeater => Ok(()),
         () = clipper => Ok(()),
         () = direct => Ok(()),
+        () = mic => Ok(()),
         r = writer => r.and(Err(Problem::SessionEnded.into())),
         r = bulk_writer => r.and(Err(Problem::SessionEnded.into())),
     };
@@ -756,6 +809,22 @@ mod tests {
         assert_eq!(
             serde_json::to_value(SessionEvent::AwaitingApproval).unwrap(),
             json!({ "type": "awaitingApproval" })
+        );
+        assert_eq!(
+            serde_json::to_value(SessionEvent::Mic {
+                state: MicState::NoDevice,
+                detail: None
+            })
+            .unwrap(),
+            json!({ "type": "mic", "state": "noDevice", "detail": null })
+        );
+        assert_eq!(
+            serde_json::to_value(SessionEvent::Mic {
+                state: MicState::Failed,
+                detail: Some("0x8889000A".into())
+            })
+            .unwrap(),
+            json!({ "type": "mic", "state": "failed", "detail": "0x8889000A" })
         );
         let h = SessionEvent::Hello {
             hostname: "Pixel".into(),

@@ -186,6 +186,12 @@ export interface ConnectOptions {
 /** 被控端的平台，与 airhand_proto::session::Platform 对应（对方的版本更新、报了这边不认识的平台时是 linux） */
 export type Platform = "windows" | "mac" | "linux" | "android";
 
+/**
+ * 被控端能不能接本机的麦克风（airhand_proto::session::MicState）：unsupported = 那个平台还不支持；
+ * noDevice = 没有虚拟麦克风（Windows：Steam Streaming Microphone）；busy = 别的控制端在用；failed = 打不开、在重试
+ */
+export type MicState = "unsupported" | "noDevice" | "ready" | "busy" | "failed";
+
 /** 系统操作（手机的导航键等），与 airhand_proto::session::SystemAction 对应 */
 export type SystemAction =
   | "back"
@@ -232,6 +238,8 @@ export type SessionEvent =
   | { type: "notice"; notice: RemoteNotice }
   /** 被控端复制的文本（只有网页版会收到，由 backend/web.ts 处理） */
   | { type: "clipboard"; text: string }
+  /** 被控端能不能接本机的麦克风：会话开始时一次，之后有变化再来；对方的版本旧时没有。detail：出错时的技术信息 */
+  | { type: "mic"; state: MicState; detail: string | null }
   | { type: "closed"; reason: Problem; retry: boolean };
 
 export type MouseButton = "left" | "right" | "middle" | "back" | "forward";
@@ -263,6 +271,8 @@ export type Command =
   | { cmd: "display"; sid: number; index: number }
   /** 开启 / 关闭被控端的声音 */
   | { cmd: "audio"; sid: number; enabled: boolean }
+  /** 打开 / 关闭本机的麦克风（打开之后 Worker 把编好的声音包发给控制端服务，见 media.ts 的 micMessage） */
+  | { cmd: "mic"; sid: number; enabled: boolean }
   /** 把这里复制的文本发给被控端（网页版：浏览器自己读剪贴板） */
   | { cmd: "clipboard"; sid: number; text: string }
   /** 打开 / 关闭剪贴板同步 */

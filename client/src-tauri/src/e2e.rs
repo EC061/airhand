@@ -6,16 +6,18 @@
 //! ```
 //! 然后运行：`cargo test --lib e2e -- --ignored --nocapture`
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use airhand_link::controller::{FromHost, establish};
+use airhand_link::controller::{Established, FromHost, establish};
 use airhand_link::host::Router;
+use airhand_link::net::Signal;
 use airhand_link::secure::{self, Identity, InitiatorParams, Sealer};
 use airhand_link::wire::{read_msg, write_msg};
 use airhand_proto::handshake::SEAL_OVERHEAD;
 use airhand_proto::media::{self, AudioHeader, VideoHeader};
 use airhand_proto::session::{
-    ByeReason, Codec, ControllerDatagram, ControllerMsg, HostMsg, InputEvent, Notice,
+    ByeReason, Codec, ControllerDatagram, ControllerMsg, HostMsg, InputEvent, MicState, Notice,
     QualitySettings, VideoPriority,
 };
 use airhand_proto::signal::{ClientMsg, ConnectError, ServerMsg, connect_outcome};
@@ -86,6 +88,63 @@ struct Report {
     capture_failed: u32,
     /// 收到的"无法采集声音"提示
     audio_failed: u32,
+    /// 被控端说的麦克风状态（同一个版本：都懂麦克风）
+    mic: Option<MicState>,
+}
+
+/// 用配对码连上被控端 `code`（请求编号 `req_id`），做完端到端握手。和真正的控制端一样：开始时的画质和声音在握手里
+async fn open_session(
+    sig: &mut Signal,
+    router: &Arc<Router>,
+    code: u32,
+    pairing: Option<&str>,
+    settings: QualitySettings,
+    audio: bool,
+    req_id: u32,
+) -> Established {
+    let me = Identity::generate();
+    let intro = secure::controller_intro("e2e", "test", settings, audio);
+    let (initiator, init) = secure::initiate(InitiatorParams {
+        code,
+        me: &me,
+        host_key: None,
+        pairing,
+        intro: &intro,
+    })
+    .unwrap();
+    write_msg(
+        &mut sig.send,
+        &ClientMsg::Connect {
+            req_id,
+            code,
+            resume: None,
+            init,
+        },
+    )
+    .await
+    .unwrap();
+    let mut buf = Vec::new();
+    let r: ServerMsg = read_msg(&mut sig.recv, MAX_SIGNAL_MSG, &mut buf)
+        .await
+        .unwrap()
+        .unwrap();
+    let ServerMsg::ConnectResult {
+        req_id: got,
+        grant,
+        error,
+    } = r
+    else {
+        panic!("{r:?}")
+    };
+    assert_eq!(got, req_id);
+    let grant = connect_outcome(grant, error).expect("服务器批准了连接");
+    println!("会话已授权: {} ({})", grant.host_name, grant.host_os);
+    // 在被控端开过来的控制通道上做完握手
+    let link = establish(router, &sig.conn, grant.session_id, initiator)
+        .await
+        .expect("端到端握手");
+    println!("端到端握手完成，安全码 {}", link.safety);
+    link
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -137,53 +196,22 @@ async fn e2e_roundtrip() {
     );
 
     // 正确控制码。端到端握手的第一条消息随请求一起发：第一次连，用配对码（测试里的被控端默认要配对码）。
-    // 和真正的控制端一样：开始时的画质和声音在握手里（被控端一开始就按它建编码器、采集声音）
-    let me = Identity::generate();
+    // 开始时就要声音（被控端一开始就按握手里的画质建编码器、采集声音）
     let settings = QualitySettings {
         codec: Codec::H264,
         fps: 30,
         ..Default::default()
     };
-    let intro = secure::controller_intro("e2e", "test", settings, true);
-    let (initiator, init) = secure::initiate(InitiatorParams {
+    let link = open_session(
+        &mut sig,
+        &router,
         code,
-        me: &me,
-        host_key: None,
-        pairing: pairing.as_deref(),
-        intro: &intro,
-    })
-    .unwrap();
-    write_msg(
-        &mut sig.send,
-        &ClientMsg::Connect {
-            req_id: 2,
-            code,
-            resume: None,
-            init,
-        },
+        pairing.as_deref(),
+        settings,
+        true,
+        2,
     )
-    .await
-    .unwrap();
-    let r: ServerMsg = read_msg(&mut sig.recv, MAX_SIGNAL_MSG, &mut buf)
-        .await
-        .unwrap()
-        .unwrap();
-    let ServerMsg::ConnectResult {
-        req_id: 2,
-        grant,
-        error,
-    } = r
-    else {
-        panic!("{r:?}")
-    };
-    let grant = connect_outcome(grant, error).expect("服务器批准了连接");
-    println!("会话已授权: {} ({})", grant.host_name, grant.host_os);
-
-    // 在被控端开过来的控制通道上做完握手
-    let link = establish(&router, &sig.conn, grant.session_id, initiator)
-        .await
-        .expect("端到端握手");
-    println!("端到端握手完成，安全码 {}", link.safety);
+    .await;
     // 控制通道的发送端接着握手里的确认往下数
     let mut ctl = Ctl {
         send: link.control.0,
@@ -234,6 +262,7 @@ async fn e2e_roundtrip() {
         no_screen_permission: false,
         capture_failed: 0,
         audio_failed: 0,
+        mic: None,
     };
     // 被控端在同一进程里，可以直接读它的时钟：画面和声音的采集时间戳都应落在"刚刚"
     let age_ms = |capture_us: u64| {
@@ -376,6 +405,10 @@ async fn e2e_roundtrip() {
             HostMsg::Direct(_) => {}
             HostMsg::Displays { .. } => {}
             HostMsg::AwaitingApproval => panic!("桌面被控端不会请本机用户同意"),
+            HostMsg::Mic { state, detail } => {
+                println!("麦克风: {state:?} {detail:?}");
+                rep.mic = Some(state);
+            }
             HostMsg::Notice(notice) => {
                 println!("提示: {notice:?}");
                 match notice.expect("同一个版本的提示都认识") {
@@ -461,6 +494,16 @@ async fn e2e_roundtrip() {
     }
     assert!(rep.hello, "没有收到 Hello");
     assert!(rep.pongs >= 3, "Ping/Pong 不工作");
+    // 同一个版本的两端都懂麦克风：被控端会说它能不能接（Windows 看有没有 Steam Streaming Microphone）
+    let mic = rep.mic.expect("被控端没有说麦克风的状态");
+    if cfg!(windows) {
+        assert!(
+            matches!(mic, MicState::Ready | MicState::NoDevice),
+            "{mic:?}"
+        );
+    } else {
+        assert_eq!(mic, MicState::Unsupported);
+    }
     if capture {
         assert!(rep.frames >= 2, "收到的视频帧太少");
         assert!(rep.keyframes >= 1);
@@ -482,6 +525,167 @@ async fn e2e_roundtrip() {
         "会话没有被清理: {:?}",
         hub.borrow().host.controllers
     );
+}
+
+/// 控制端的麦克风，从协议级的控制端一直到 Windows 上的虚拟麦克风（需要这台电脑上有 Steam Streaming Microphone，
+/// 没有时只检查被控端说了 noDevice）：打开麦克风，像界面那样每 20 ms 发一包 1 kHz 的声音（每个数据报带着上一包的副本，
+/// 再故意丢掉一些数据报），从"麦克风 (Steam Streaming Microphone)"录到的应该还是 1 kHz；关掉之后放开设备。
+/// 和 `e2e_roundtrip` 一样要先启动服务器
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn e2e_mic() {
+    use crate::host::mic::tests::goertzel;
+    use crate::host::mic::wasapi::tests::Recorder;
+    use airhand_proto::datagram;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info,quinn=warn,airhand_lib::host::mic=debug")
+        .try_init();
+    let hub = status::new_hub();
+    let _host = HostService::start(hub.clone());
+    let (code, pairing) = wait_host(&hub).await;
+    let mut sig = airhand_link::net::connect_signal(&crate::config::link(), Role::Controller, None)
+        .await
+        .expect("控制端连接服务器");
+    let (router, _router) = Router::start(&sig.conn);
+    let link = open_session(
+        &mut sig,
+        &router,
+        code,
+        pairing.as_deref(),
+        QualitySettings::default(),
+        false,
+        1,
+    )
+    .await;
+    let mut ctl = Ctl {
+        send: link.control.0,
+        sealer: link.control.1,
+    };
+    let (session_id, mut mic_sealer, datagrams) = (link.session_id, link.mic, link.datagrams);
+    let mut recv = link.receiver;
+    let _registration = link.registration;
+
+    // 被控端在 Hello 之后说它能不能接
+    let mut state = None;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while state.is_none() && Instant::now() < deadline {
+        datagrams.send(&ControllerDatagram::Ping { t: 1 });
+        if let Ok(Ok(FromHost::Control(HostMsg::Mic { state: s, detail }))) =
+            tokio::time::timeout(Duration::from_millis(500), recv.recv()).await
+        {
+            println!("麦克风: {s:?} {detail:?}");
+            state = Some(s);
+        }
+    }
+    let state = state.expect("被控端没有说麦克风的状态");
+    if state == MicState::NoDevice {
+        println!("这台电脑上没有 Steam Streaming Microphone，跳过声音的检查");
+        return;
+    }
+    assert_eq!(state, MicState::Ready);
+
+    ctl.send(&ControllerMsg::Mic { enabled: true }).await;
+    let mut rec = Recorder::open().expect("从 Steam Streaming Microphone 录音");
+    // 像界面的音频线程那样准时地每 20 ms 发一包（tokio 的定时器在 Windows 上可能晚 15 ms，发不够每秒 50 包）
+    let conn = sig.conn.clone();
+    let sender = std::thread::spawn(move || {
+        let mut enc =
+            opus::Encoder::new(48_000, opus::Channels::Mono, opus::Application::Voip).unwrap();
+        let (mut phase, mut opus_buf) = (0f64, vec![0u8; 1000]);
+        let mut previous: Option<Vec<u8>> = None;
+        let start = Instant::now();
+        for seq in 1..=150u32 {
+            let at = start + Duration::from_millis(20 * (seq as u64 - 1));
+            std::thread::sleep(at.saturating_duration_since(Instant::now()));
+            let pcm: Vec<f32> = (0..960)
+                .map(|_| {
+                    let v = phase.sin() as f32 * 0.5;
+                    phase += 2.0 * std::f64::consts::PI * 1000.0 / 48_000.0;
+                    v
+                })
+                .collect();
+            let len = enc.encode_float(&pcm, &mut opus_buf).unwrap();
+            let h = AudioHeader {
+                seq,
+                start: seq == 1,
+                capture_us: seq as u64 * 20_000,
+            };
+            let packet = media::frame(&h.encode(), &[&opus_buf[..len]])[4..].to_vec();
+            // 和控制端一样带上上一包的副本；每 7 个数据报丢一个，下一个数据报里的副本把它补回来
+            let plain = media::audio_datagram(&packet, previous.as_deref()).unwrap();
+            previous = Some(packet);
+            let d = mic_sealer
+                .seal_datagram(session_id, datagram::AUDIO, &plain)
+                .unwrap();
+            if seq % 7 != 0 {
+                conn.send_datagram(d.into()).unwrap();
+            }
+        }
+    });
+    // 被控端说的状态（打开设备之后还是 ready；打不开会说 failed）
+    let (mut states, mut recorded) = (Vec::new(), Vec::new());
+    let end = Instant::now() + Duration::from_millis(3_300);
+    while Instant::now() < end {
+        datagrams.send(&ControllerDatagram::Ping { t: 1 });
+        rec.read(&mut recorded).unwrap();
+        // 录音的缓冲只有 200 ms：每 20 ms 回来读一次
+        let slice = Instant::now() + Duration::from_millis(20);
+        while let Ok(Ok(m)) =
+            tokio::time::timeout(slice.saturating_duration_since(Instant::now()), recv.recv()).await
+        {
+            if let FromHost::Control(HostMsg::Mic { state, detail }) = m {
+                println!("麦克风: {state:?} {detail:?}");
+                states.push(state);
+            }
+        }
+    }
+    sender.join().unwrap();
+    rec.read(&mut recorded).unwrap();
+    drop(rec);
+    assert!(
+        !states.contains(&MicState::Failed),
+        "被控端打不开虚拟麦克风: {states:?}"
+    );
+    let voice: Vec<f32> = recorded
+        .iter()
+        .copied()
+        .skip_while(|v| v.abs() < 0.05)
+        .collect();
+    let secs = voice.len() as f64 / 48_000.0;
+    // 声音断没断：发了 3 秒，前 2.5 秒里每 10 ms 一段，没声音的段数（抖动缓冲断粮、丢了的包没补上）
+    let windows: Vec<f32> = voice
+        .chunks(480)
+        .take(250)
+        .map(|w| (w.iter().map(|v| v * v).sum::<f32>() / w.len() as f32).sqrt())
+        .collect();
+    let quiet = windows.iter().filter(|r| **r < 0.1).count();
+    println!("前 {} 段 10 ms 里没声音的 {quiet} 段", windows.len());
+    assert!(quiet <= 5, "声音断断续续：{quiet} 段没声音");
+    let at = |f| goertzel(&voice, 48_000.0, f);
+    let (tone, others) = (at(1000.0), [at(459.0), at(500.0), at(918.0), at(1088.0)]);
+    println!("录到 {secs:.2} 秒声音：1 kHz {tone:.3}，459/500/918/1088 Hz {others:.4?}");
+    assert!(secs > 2.0, "从虚拟麦克风录到的声音太少");
+    assert!(tone > 0.1, "声音太小：{tone}");
+    assert!(
+        others.iter().all(|o| tone > o * 20.0),
+        "声音变调了（虚拟麦克风两边的格式没对上？）"
+    );
+
+    // 关掉：被控端放开设备，还是 ready（能再打开）
+    ctl.send(&ControllerMsg::Mic { enabled: false }).await;
+    let off = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(FromHost::Control(HostMsg::Mic { state, .. })) = recv.recv().await {
+                break state;
+            }
+        }
+    })
+    .await;
+    // 状态没变（还是 ready）就不会再说一遍
+    assert!(matches!(off, Err(_) | Ok(MicState::Ready)), "{off:?}");
+    let _ = ctl.send.finish();
 }
 
 /// 服务器重启后，被控端应自动重连并取回原控制码。会自行启动/重启服务器进程。

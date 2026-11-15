@@ -73,7 +73,9 @@ impl Place {
             | HostMsg::CursorImage { .. }
             | HostMsg::Clipboard { .. }
             | HostMsg::Bye(_)
-            | HostMsg::Direct(_) => queued(None),
+            | HostMsg::Direct(_)
+            // 麦克风的状态很少变，跟在 Hello 后面按顺序发
+            | HostMsg::Mic { .. } => queued(None),
         }
     }
 
@@ -347,6 +349,13 @@ mod tests {
             (notice(), SessionLane::Control),
             (HostMsg::AwaitingApproval, SessionLane::Control),
             (HostMsg::Bye(ByeReason::Kicked), SessionLane::Control),
+            (
+                HostMsg::Mic {
+                    state: airhand_proto::session::MicState::Ready,
+                    detail: None,
+                },
+                SessionLane::Control,
+            ),
             (cursor(true, 1), SessionLane::Control),
             (image(1), SessionLane::Bulk),
             (clipboard(3), SessionLane::Bulk),

@@ -23,6 +23,8 @@ npm test
 cargo test --lib
 # 声音环回采集（需要声音输出设备，会以 -60 dBFS 播放 1.5 秒测试音，几乎听不见）
 cargo test --lib loopback_captures_tone -- --ignored --nocapture
+# Windows：控制端的麦克风写进 Steam Streaming Microphone（这台电脑上要有它），从它的录音端录回 1 kHz 的声音
+cargo test --lib mic_reaches_steam_streaming_microphone -- --ignored --nocapture
 
 # android/native/：Android 的 Rust 核心（在当前电脑上跑：在途控制、关键帧、声音分发、命令格式）
 cargo test
@@ -51,6 +53,7 @@ AIRHAND_CERT=target/e2e/cert.pem AIRHAND_KEY=target/e2e/key.pem ./target/debug/a
 # client/src-tauri/
 cargo test --lib e2e_roundtrip -- --ignored --nocapture   # 画面 / 编码切换 / 剪贴板 / 声音 / Ping / 断开
 cargo test --lib e2e_reconnect -- --ignored --nocapture   # 服务器重启后取回控制码、更换控制码
+cargo test --lib e2e_mic -- --ignored --nocapture         # Windows：控制端的麦克风经过中转放进 Steam Streaming Microphone
 ```
 
 ## 调试工具

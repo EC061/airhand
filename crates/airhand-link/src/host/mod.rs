@@ -11,7 +11,8 @@
 //!   [`Incoming::init`] 里）：让不让这个控制端进来由平台给的 [`Gate`] 决定（配对过的、输对配对码的、本机用户同意的……），
 //!   发出决定就开始，控制端确认了才显示它、才请本机用户同意（重放的握手消息走不到这一步）。
 //!   过时的输入在读任务里就换成了"释放所有按键"（见 [`InputClock`]）；
-//!   Ping（控制数据报）在读任务里回 Pong，画面确认在读任务里交给平台的 [`Acks`]，不等会话的主循环；
+//!   Ping（控制数据报）在读任务里回 Pong，画面确认在读任务里交给平台的 [`Acks`]，控制端麦克风的声音交给平台的
+//!   [`MicSink`]，都不等会话的主循环；
 //! * [`Outbox`]（[`queue`]）：发给控制端的消息。按消息挑通道（大的走大块通道），只关心最新值的状态
 //!   （显示器列表、光标可见性）只留最新的一个、排在前面；
 //! * [`CursorCache`]：控制端缓存了哪些光标形状；
@@ -51,8 +52,8 @@ pub use clock::InputClock;
 pub use cursor::CursorCache;
 pub use queue::{Encoded, Outbox, SendError};
 pub use session::{
-    APPROVAL_TIMEOUT, Acks, ApprovalSlots, MAX_PENDING_APPROVALS, PEER_TIMEOUT, Platform, Request,
-    Senders, Start, serve,
+    APPROVAL_TIMEOUT, Acks, ApprovalSlots, MAX_PENDING_APPROVALS, MicSink, PEER_TIMEOUT, Platform,
+    Request, Senders, Start, serve,
 };
 pub use streams::{Admitted, ControllerReceiver, HostStreams, Writer};
 

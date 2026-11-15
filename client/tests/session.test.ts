@@ -31,7 +31,9 @@ function sessionHarness(connect?: (code: string, resume: any, opts: any) => Prom
         sink = onEvent;
         return connect ? connect(c, o.resume, o) : new Promise(res => { resolve = res; });
       },
-      command: async (c: any) => { calls.push(c.cmd === "settings" ? [c.cmd, c.sid, c.settings] : [c.cmd, c.sid]); },
+      command: async (c: any) => {
+        calls.push(c.cmd === "settings" ? [c.cmd, c.sid, c.settings] : c.cmd === "mic" ? [c.cmd, c.sid, c.enabled] : [c.cmd, c.sid]);
+      },
     },
     // 延时发送用的定时器：由测试手动触发
     window: { setTimeout: (fn: () => void) => { timers.push(fn); return timers.length; } },
@@ -44,7 +46,7 @@ function sessionHarness(connect?: (code: string, resume: any, opts: any) => Prom
     view: { setSync() {}, setAudio() {}, setLayout() {}, dispose() {} }, frame: { w: 16, h: 9 }, input: { reset() {} },
     cursorSlots: new Map(), resume: null, hostKey: null, safety: null, pairing: null,
     onlineAt: -1, attemptAt: 0, retries: 0,
-    emit() {}, syncAudio() {}, applySyncState() {}, onConnected() { calls.push("connected"); },
+    emit() {}, syncAudio() {}, syncMic() {}, applySyncState() {}, onConnected() { calls.push("connected"); },
   });
   return { session, calls, timers, store: storeState, event: (ev: any) => sink(ev), resolve: () => resolve({ sid: 7, resume: [], hostName: "host", hostOs: "Android" }) };
 }
@@ -322,6 +324,74 @@ test("光标画在画面里（对方拖动、缩放窗口）：默认照样显�
   push(1 | 8);
   assert.equal(style.cursor, "none");
   assert.deepEqual(hidden, [false, false, false, false], "一直没有改发相对移动");
+});
+
+test("麦克风：对方说了能接、开关打开、正在查看时才告诉对方打开；对方 ready 才采集；切走、断开、本机不允许时关掉", async () => {
+  const h = sessionHarness();
+  const s = h.session;
+  const capture: string[] = [];
+  let refuse: string | null = null;
+  Object.assign(s, {
+    sid: 7, foreground: true, micEnabled: false, micState: null, micDetail: null, micError: null,
+    micOn: false, micCapturing: false,
+    mic: {
+      start: async () => {
+        capture.push("start");
+        if (refuse) throw refuse;
+      },
+      stop: () => capture.push("stop"),
+    },
+  });
+  delete s.syncMic;
+  const mics = () => h.calls.filter((c) => Array.isArray(c) && c[0] === "mic").map((c) => c[2]);
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  // 对方还没说（版本旧的对方不会说）：开关打开也不发
+  s.setMicEnabled(true);
+  assert.deepEqual(mics(), []);
+  // 对方没有虚拟麦克风：告诉它打开（它等着设备出现），这边还不采集
+  s.onEvent({ type: "mic", state: "noDevice", detail: null });
+  assert.deepEqual(mics(), [true]);
+  assert.deepEqual(capture, []);
+  // 设备有了：开始采集，不用再告诉对方
+  s.onEvent({ type: "mic", state: "ready", detail: null });
+  assert.deepEqual(capture, ["start"]);
+  assert.equal(s.micLive, true);
+  assert.deepEqual(mics(), [true]);
+  // 对方打不开了：停止采集，对方还开着（它在重试）
+  s.onEvent({ type: "mic", state: "failed", detail: "0x8889000A" });
+  assert.deepEqual(capture, ["start", "stop"]);
+  assert.equal(s.micDetail, "0x8889000A");
+  s.onEvent({ type: "mic", state: "ready", detail: null });
+  // 切到别的标签：对方放开设备，切回来再打开
+  s.setForeground(false);
+  assert.deepEqual(mics(), [true, false]);
+  assert.deepEqual(capture, ["start", "stop", "start", "stop"]);
+  s.setForeground(true);
+  assert.deepEqual(mics(), [true, false, true]);
+  // 本机不允许用麦克风：开关关掉、告诉对方，原因留着；再打开时清掉
+  s.setMicEnabled(false);
+  refuse = "denied";
+  s.setMicEnabled(true);
+  await settle();
+  assert.equal(s.micError, "denied");
+  assert.equal(s.micEnabled, false);
+  assert.equal(s.micLive, false);
+  assert.deepEqual(mics(), [true, false, true, false, true, false]);
+  refuse = null;
+  s.setMicEnabled(true);
+  assert.equal(s.micError, null);
+  assert.equal(s.micLive, true);
+  // 会话断了：停止采集，不用告诉（对方已经不在了）；对方不支持时什么也不发
+  const sent = mics().length;
+  s.sid = null;
+  s.syncMic();
+  assert.equal(capture.at(-1), "stop");
+  assert.equal(mics().length, sent);
+  s.sid = 8;
+  s.micState = "unsupported";
+  s.syncMic();
+  assert.equal(mics().length, sent);
 });
 
 test("stale completion cannot finish a newer attempt", () => {

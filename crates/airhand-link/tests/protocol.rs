@@ -99,6 +99,13 @@ fn commands() -> Vec<(Value, Command)> {
             },
         ),
         (
+            json!({ "cmd": "mic", "sid": 3, "enabled": true }),
+            Command::Mic {
+                sid: 3,
+                enabled: true,
+            },
+        ),
+        (
             json!({ "cmd": "clipboard", "sid": 3, "text": "hi" }),
             Command::Clipboard {
                 sid: 3,

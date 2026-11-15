@@ -5,7 +5,8 @@
 ## General
 
 - The clipboard syncs text only, not files
-- Audio flows from host to controller only; the controller's microphone isn't forwarded. Audio is captured after the volume control, so a muted host sends silence
+- Audio is captured after the host's volume control, so a muted host sends silence
+- The controller's microphone only reaches Windows hosts that have Steam Streaming Microphone (Steam installed and Steam Remote Play used once): Airhand has no virtual sound card driver of its own. macOS, Linux and Android hosts can't take it yet, and the Android controller can't send it yet
 - Sessions are end-to-end encrypted, so the relay can't see their content, but it still knows who connected to whom, when, and how much traffic flowed (see [Security](security.md#end-to-end-encryption))
 - The web console is where end-to-end encryption ends: the machine running it can see the picture
 - On the first connection to a computer its identity is whatever was seen then (like SSH): only the pairing code (or comparing the safety code) proves nobody is impersonating it
@@ -17,6 +18,7 @@
 - The host only runs in the console session (the physical screen): Remote Desktop (RDP) sessions can't be controlled
 - `Ctrl+Alt+Del` can't be sent yet (it needs `SendSAS`)
 - Debug builds run the host in the tray process, without SYSTEM rights, so they can't capture or control UAC prompts and the lock screen (the controller shows a capture error meanwhile)
+- The controller's microphone is written into Steam Streaming Microphone in exclusive mode when its two devices ("Speakers" and "Microphone" in the sound settings) have different default formats (the usual case): while a controller's microphone is on, Steam Remote Play can't use it and vice versa, and it can't be opened if "Allow applications to take exclusive control of this device" is turned off (giving both devices the same default format avoids exclusive mode). It isn't made the default recording device automatically: choose it in the program, or set it in the sound settings yourself
 
 ## macOS
 
