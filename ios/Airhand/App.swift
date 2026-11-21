@@ -73,7 +73,6 @@ struct RootView: View {
                 .tag(AppModel.Tab.settings)
         }
         .toasts(app)
-        .onChange(of: app.showingSession) { _, _ in SessionPresenter.sync(app) }
         .onOpenURL { url in app.open(url) }
         #if DEBUG
         .task {

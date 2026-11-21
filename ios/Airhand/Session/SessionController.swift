@@ -1139,7 +1139,7 @@ final class FloatingMenuButton: UIView {
     }
 }
 
-/// 把远程画面（UIKit）全屏推出来、收回去
+/// 把远程画面（UIKit）全屏推出来、收回去（AppModel.showingSession 改了就调用）
 enum SessionPresenter {
     static func sync(_ app: AppModel) {
         guard let root = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first?.rootViewController else { return }
@@ -1153,7 +1153,7 @@ enum SessionPresenter {
             var host = root
             while let p = host.presentedViewController, !(p is SessionController) { host = p }
             host.present(vc, animated: true)
-        } else if let current {
+        } else if let current, !current.isBeingDismissed {
             current.presentingViewController?.dismiss(animated: true) {
                 AppDelegate.orientationLock = .all
                 UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first?.requestGeometryUpdate(.iOS(interfaceOrientations: .all)) { _ in }

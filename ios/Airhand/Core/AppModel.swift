@@ -19,7 +19,13 @@ final class AppModel {
     var session: RemoteSession?
     /// 远程画面全屏显示着
     var showingSession = false {
-        didSet { session?.setHidden(!showingSession) }
+        didSet {
+            session?.setHidden(!showingSession)
+            // 在这里推出 / 收回远程画面，不能靠 SwiftUI 的 onChange：远程画面是 .fullScreen 弹出的，
+            // 下面的 SwiftUI 视图被移出窗口、不再更新，回到首页和断开时 onChange 不会触发。
+            // 放到下一轮：session 和 showingSession 都改完了再同步
+            DispatchQueue.main.async { [self] in SessionPresenter.sync(self) }
+        }
     }
     /// 首页正在连接的控制码（按钮上转圈），以及连接失败的原因
     var connectingCode: String?
