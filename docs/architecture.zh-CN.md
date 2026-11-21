@@ -140,7 +140,10 @@ Android 被控端只有一个编码器，但每个观看者分别计在途字节
 | `server/` | 中转服务器（quinn + rustls）及其 `Dockerfile`。`src/broker/`：`registry`（控制码登记、连接请求）、`relay`（会话通道的配对和转发、数据报）、`limits`（限速）、`tokens`（密钥和重连凭证）；锁的先后在调试构建里有检查（`lock.rs`） |
 | `web/` | 网页控制台服务（axum：静态网页 + WebSocket，HTTP / HTTPS 同一端口）及其 `Dockerfile`、`docker-compose.yml`。和 `client/src-tauri/` 一样是独立的 Cargo 工作区 |
 | `client/src-tauri/` | 桌面客户端 Rust 部分：被控端 `host/`、托盘、控制台窗口和命令，对方复制的文件放进系统剪贴板（`clipfiles/`） |
-| `android/native/` | Android 的 Rust 核心（JNI）：控制端用 `airhand-link`；被控端的网络部分（服务器连接、会话和它的各条通道用 `airhand_link::host`，Android 只实现 `host::Platform`；在途控制和码率控制与桌面版相同）。和 `client/src-tauri/`、`web/` 一样是独立的 Cargo 工作区 |
+| `crates/airhand-mobile` | Android 和 iOS 共用的手机核心：控制端用 `airhand-link`（命令和事件是 JSON，会话数据由界面的线程阻塞地取）；被控端的网络部分（服务器连接、会话和它的各条通道用 `airhand_link::host`，手机只实现 `host::Platform`；画面分发、在途控制和码率控制与桌面版相同）。和协议、链路库一样属于根目录的工作区 |
+| `android/native/` | Android 的 Rust 核心：`airhand-mobile` 的 JNI 包装。和 `client/src-tauri/`、`web/` 一样是独立的 Cargo 工作区 |
+| `ios/native/` | iOS 的 Rust 核心：`airhand-mobile` 的 C 接口包装（`include/airhand.h`），编译成静态库给 App 和屏幕广播扩展链接；`examples/fake_host.rs` 是测 iOS 控制端用的模拟被控端。独立的 Cargo 工作区 |
+| `ios/` | iOS / iPadOS 应用（SwiftUI + UIKit，`project.yml` 用 XcodeGen 生成工程）：VideoToolbox 解码 / 编码、AudioToolbox 的 Opus、手势和键鼠、屏幕广播扩展（被控端，只能看），见 [iOS](ios.zh-CN.md) |
 | `android/app/` | Android 应用（Kotlin + Jetpack Compose）：手机和电视界面、MediaCodec 解码 / 编码、屏幕录制、无障碍服务（远程操作） |
 | `client/src/` | `lib/session.ts` 管理会话，`connection-attempt.ts` 隔离连接代际，`media.ts` 解析媒体包，`video.ts` 管理解码 / 画面队列，`input.ts` 管理输入（含相对移动和指针锁定），`screens.ts` 摆放同时显示的几个显示器（多屏）；控制台界面（React 19 + TypeScript，不依赖 UI 库），桌面版和网页版共用，区别只在 `client/src/lib/backend/`；文案在 `client/src/locales/` |
 | `assets/icon.svg` | 应用图标源文件 |
