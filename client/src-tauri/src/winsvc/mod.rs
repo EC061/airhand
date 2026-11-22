@@ -23,7 +23,8 @@
 //! * 托盘经命名管道（[`ipc`]）显示被控端的状态、发送命令（断开控制端、更换控制码、开机自动启动）；
 //! * 托盘和服务同进同退：打开 Airhand 时启动服务，托盘"退出"时停止服务；服务停止（或者被卸载）时托盘也退出；
 //! * 开机自动启动（`config.toml` 的 `autostart`，托盘里可以切换）= 服务的启动类型为"自动" + 登录时启动托盘
-//!   （`HKLM\...\Run` 里的 `Airhand`）；
+//!   （`HKLM\...\Run` 里的 `Airhand`）。在任务管理器的"启动应用"里禁用过它的话，托盘里打开时一并恢复
+//!   （见 [`STARTUP_APPROVED_KEY`]）；
 //! * 卸载（`--uninstall`）删除服务和这个启动项，安装目录里的文件（包括 config.toml）由卸载程序删除；
 //! * 服务以 SYSTEM 身份运行安装目录里的程序，所以为所有用户安装时安装包只允许装在 Program Files 里（普通用户改不了）。
 //!
@@ -62,7 +63,7 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Registry::{
-    HKEY_LOCAL_MACHINE, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW,
+    HKEY, HKEY_LOCAL_MACHINE, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW,
 };
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Services::{
@@ -88,6 +89,13 @@ use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 pub const SERVICE_NAME: &str = "Airhand";
 /// 开机启动托盘的注册表位置（为所有用户安装时在 HKLM 下，仅为当前用户安装时在 HKCU 下）
 const RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+/// 任务管理器的"启动应用"（还有"设置 → 应用 → 启动"）里启用 / 禁用过的启动项记在这里：一项一个值，值名和 [`RUN_KEY`]
+/// 里的一样（`Airhand`），没有这个值就是启用。HKLM 的 Run 项记在 HKLM 下，HKCU 的记在 HKCU 下。
+/// 删掉 Run 项时系统不会删它：卸载后重新安装，Run 项还被"已禁用"挡着，托盘里勾着自动启动，其实不启动。
+/// 所以用户在托盘里打开自动启动时删掉它（[`choose_autostart`]、[`user::choose_autostart`]），安装包在卸载、
+/// 第一次安装时也删掉它（`windows/hooks.nsh`）；按 config.toml 同步时、升级时不动：那是用户在任务管理器里的选择
+const STARTUP_APPROVED_KEY: &str =
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
 /// 让托盘退出的命名事件（见 [`watch_quit`]）。每个会话一个，和单实例的互斥体一样（见 `crate::single_instance`）。
 /// 安装包（`windows/hooks.nsh`）看它在不在，判断升级前托盘开着没有
 const QUIT_EVENT: &str = r"Local\Airhand.Quit";
@@ -396,6 +404,34 @@ pub fn apply_autostart(on: bool) -> Result<()> {
     }
     .context("ChangeServiceConfig")?;
     set_run_key(on)
+}
+
+/// 用户在托盘菜单里切换开机自动启动（经命名管道交给服务里的被控端）：同 [`apply_autostart`]，打开时还删掉任务管理器里
+/// "已禁用"的记录（见 [`STARTUP_APPROVED_KEY`]）：用户明确要打开，登录时启动托盘的 Run 项不能还被它挡着
+pub fn choose_autostart(on: bool) -> Result<()> {
+    apply_autostart(on)?;
+    if on && let Err(e) = forget_startup_disabled(HKEY_LOCAL_MACHINE) {
+        // 服务照样开机启动，只是登录后不打开托盘：不算切换失败
+        warn!("{e:#}");
+    }
+    Ok(())
+}
+
+/// 删掉 `root`（HKLM / HKCU）下任务管理器对 Airhand 启动项的记录（见 [`STARTUP_APPROVED_KEY`]），启动项又算启用了。
+/// 没有这条记录时什么也不做
+fn forget_startup_disabled(root: HKEY) -> Result<()> {
+    let r = unsafe {
+        RegDeleteKeyValueW(
+            root,
+            &HSTRING::from(STARTUP_APPROVED_KEY),
+            &HSTRING::from(SERVICE_NAME),
+        )
+    };
+    if r.is_err() && r != windows::Win32::Foundation::ERROR_FILE_NOT_FOUND {
+        r.ok()
+            .context("can't delete the Task Manager startup record")?;
+    }
+    Ok(())
 }
 
 /// 登录时启动托盘（所有用户）

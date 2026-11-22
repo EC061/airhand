@@ -6,7 +6,8 @@
 //!
 //! * 安装包复制完文件后运行 `airhand.exe --install-user`：在 `HKCU\Software\Airhand` 里记下这个 airhand.exe 的位置
 //!   （启动时据此认出自己是装好的，见 [`installed_here`]；没有安装的 airhand.exe 不能运行），按 config.toml 设置登录时自动启动；
-//! * 登录时自动启动（`config.toml` 的 `autostart`，托盘里可以切换）= `HKCU\...\Run` 里的 `Airhand`；
+//! * 登录时自动启动（`config.toml` 的 `autostart`，托盘里可以切换）= `HKCU\...\Run` 里的 `Airhand`。
+//!   在任务管理器的"启动应用"里禁用过它的话，托盘里打开时一并恢复（[`choose_autostart`]）；
 //! * 升级（`--stop`）、卸载（`--uninstall`）和为所有用户安装时共用，见 [`super`]；卸载时删除上面两项（[`unregister`]）；
 //! * config.toml 和为所有用户安装时一样在程序旁边：安装目录在用户自己的目录里，托盘直接读写
 //!   （安装包不让仅为当前用户安装的 Airhand 装进 Program Files 和 Windows 文件夹）；
@@ -103,6 +104,20 @@ pub(super) fn unregister() -> Result<()> {
         let _ = hkcu.delete_subkey(KEY);
     }
     info!("removed the per-user installation");
+    Ok(())
+}
+
+/// 用户在托盘菜单里切换登录时自动启动：同 [`apply_autostart`]，打开时还删掉任务管理器里"已禁用"的记录
+/// （见 [`super::STARTUP_APPROVED_KEY`]）：用户明确要打开，Run 项不能还被它挡着。
+/// 启动时按 config.toml 同步（[`apply_autostart`]）不删：在任务管理器里禁用是用户的选择
+pub fn choose_autostart(on: bool) -> Result<()> {
+    apply_autostart(on)?;
+    if on
+        && let Err(e) =
+            super::forget_startup_disabled(windows::Win32::System::Registry::HKEY_CURRENT_USER)
+    {
+        warn!("{e:#}");
+    }
     Ok(())
 }
 

@@ -45,14 +45,14 @@ On Windows Airhand is installed with its installer, either for all users or just
 The host runs as the system service **Airhand**, as SYSTEM in the session of whoever is at the screen, so it keeps working on the lock screen, the sign-in screen and UAC prompts, and follows when users are switched. The tray icon is an ordinary program that shows the service's status and controls it:
 
 - Opening Airhand starts the service; **Quit** in the tray stops it (as before, the computer can't be controlled after quitting); when the service stops (or is uninstalled) the tray icons close too
-- **Start with Windows** (tray menu, on by default): the service starts at boot, so the computer can be controlled before anyone signs in, and the tray icon appears after signing in
+- **Start with Windows** (tray menu, on by default): the service starts at boot, so the computer can be controlled before anyone signs in, and the tray icon appears after signing in. Disabling Airhand under Startup apps in Task Manager only keeps the tray from opening after sign-in (the service still starts at boot), and the tick in the tray menu doesn't follow it: turn Start with Windows off and on again in the menu to bring it back
 - The configuration file `config.toml` is in the install directory (created on installation, see [Configuration file](#configuration-file)) and maintained by the service; edit it as administrator
 - **Uninstalling** (Settings → Apps) stops and removes the service, the startup entry, `config.toml` and the program; nothing is left behind (see [Uninstalling](#uninstalling)). Installing a new version over an old one keeps `config.toml`, and with it the control code and My devices, even if you choose to uninstall the old version first
 
 ### Just for me
 
 - The host runs inside the tray process: after **Quit** in the tray the computer can't be controlled, but it keeps running while the console is open, the same as when installed for all users. The top of the tray menu says "Installed just for you"
-- **Start when you sign in** (tray menu, on by default): Airhand starts by itself after you sign in
+- **Start when you sign in** (tray menu, on by default): Airhand starts by itself after you sign in. If you disabled Airhand under Startup apps in Task Manager, the tick in the tray menu doesn't follow it: turn it off and on again in the menu to bring it back
 - The configuration file `config.toml` is in the install directory too (see [Configuration file](#configuration-file)), maintained by the tray; you can edit it directly
 - Uninstalling and upgrading work the same as for all users (see [Uninstalling](#uninstalling))
 - If someone else then installs Airhand for all users, the copy installed just for you stops running (two hosts would run at the same time) and no longer starts when you sign in, and asks whether to uninstall it. This also happens while it's running: its host stops as soon as it notices
@@ -93,7 +93,7 @@ After these steps nothing of Airhand is left on the computer (except two things 
 
 ### Windows
 
-Settings → Apps → Airhand → Uninstall. The uninstaller stops and removes the Airhand service (when installed just for you, it closes the tray instead) and the startup entry, and deletes the install directory (including `config.toml`), the registry keys the installer wrote, the Windows Firewall rules added for `airhand.exe`, and the console's temporary directories. Nothing else to do by hand.
+Settings → Apps → Airhand → Uninstall. The uninstaller stops and removes the Airhand service (when installed just for you, it closes the tray instead) and the startup entry (including whether it was enabled or disabled under Startup apps in Task Manager; otherwise it would still be disabled after reinstalling), and deletes the install directory (including `config.toml`), the registry keys the installer wrote, the Windows Firewall rules added for `airhand.exe`, and the console's temporary directories. Nothing else to do by hand.
 
 (Choosing "uninstall the old version first" during an upgrade isn't an uninstall: `config.toml` is kept, see [Windows installation](#windows-installation).)
 

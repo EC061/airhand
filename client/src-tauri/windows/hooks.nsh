@@ -22,7 +22,9 @@
 ;   远程帮别人升级时，连接随之恢复；
 ; * 卸载：运行 `--uninstall`：删除这一份注册的服务、启动项、安装位置记录，让它的托盘退出。
 ; 卸载（不是升级）时还删除安装目录里程序运行时生成的文件（config.toml）、安装程序和 Tauri 记下的注册表项和应用数据目录
-; （不管有没有勾选"删除应用程序数据"）、防火墙里为 airhand.exe 添加的规则。
+; （不管有没有勾选"删除应用程序数据"）、防火墙里为 airhand.exe 添加的规则、任务管理器"启动应用"里对它的启用 / 禁用记录
+; （删掉 Run 项时系统不删它，留着的话重新安装后 Run 项还被"已禁用"挡着，见 src/winsvc/mod.rs 的 STARTUP_APPROVED_KEY）。
+; 第一次安装（不是升级）时也删一次这条记录：以前的版本卸载时没删。升级时保留，那是用户在任务管理器里的选择。
 ;
 ; 升级时如果选择"先卸载旧版本"，旧版本的卸载程序由新的安装程序启动：安装程序启动时设置环境变量 AIRHAND_UPGRADE，
 ; 卸载程序继承了它，就保留 config.toml（控制码、服务器设置、控制台的"我的设备"）。直接卸载时没有这个变量，配置文件一起删除。
@@ -43,6 +45,9 @@
 !define AIRHAND_RUNKEY "Software\Microsoft\Windows\CurrentVersion\Run"
 ; 和 src/winsvc/user.rs 一样：仅为当前用户安装时记下安装位置的地方。不分大小写的话它也是模板的 ${MANUKEY}，只删自己的值
 !define AIRHAND_USERKEY "Software\Airhand"
+; 和 src/winsvc/mod.rs 的 STARTUP_APPROVED_KEY 一样：任务管理器"启动应用"里对 Run 项的启用 / 禁用记录，值名和 Run 里的一样。
+; HKLM 的 Run 项记在 HKLM 下，HKCU 的记在 HKCU 下，所以和 Run 项一样按 SHCTX 删
+!define AIRHAND_STARTUPKEY "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
 
 ; 1：有管理员权限（安装 / 卸载程序已经提升了权限）
 Var AirhandAdmin
@@ -337,6 +342,10 @@ FunctionEnd
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  ; 第一次安装：删掉以前卸载时留下的任务管理器"已禁用"记录，不然登录时启动的 Run 项还被它挡着（见文件开头）
+  ${If} $AirhandExisting == ""
+    DeleteRegValue SHCTX "${AIRHAND_STARTUPKEY}" "Airhand"
+  ${EndIf}
   ${If} $MultiUser.InstallMode == "CurrentUser"
     DetailPrint "Setting up Airhand for this user…"
     nsExec::ExecToLog '"$INSTDIR\${MAINBINARYNAME}.exe" --install-user'
@@ -446,6 +455,8 @@ FunctionEnd
     DeleteRegKey /ifempty HKCU "${MANUKEY}"
     ; 仅为我安装时记下的安装位置：PREUNINSTALL 的 --uninstall 已经删了值，键空了的话这里删掉（不依赖它和 MANUKEY 同名）
     DeleteRegKey /ifempty HKCU "${AIRHAND_USERKEY}"
+    ; 任务管理器"启动应用"里对 Run 项的启用 / 禁用记录（见文件开头）：为所有用户安装时在 HKLM，仅为我安装时在 HKCU
+    DeleteRegValue SHCTX "${AIRHAND_STARTUPKEY}" "Airhand"
     ; Tauri 的应用数据目录（Tauri 同样只在勾选"删除应用程序数据"时删除；Airhand 不用它们，以防万一）。
     ; 要在上面按 SHCTX 删完之后再切换到当前用户
     SetShellVarContext current

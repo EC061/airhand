@@ -377,7 +377,7 @@ pub(crate) fn on_menu(app: &AppHandle, id: &str) {
                 let on = !current;
                 std::thread::spawn(move || {
                     match config::save_autostart(on)
-                        .and_then(|()| winsvc::user::apply_autostart(on))
+                        .and_then(|()| winsvc::user::choose_autostart(on))
                     {
                         Ok(()) => {
                             info!(on, "autostart changed");
