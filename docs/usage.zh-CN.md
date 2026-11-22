@@ -176,7 +176,7 @@ sudo apt remove airhand     # 删除程序（.deb 安装的）
 rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/airhand"  # 删除当前用户的配置和配对记录
 ```
 
-卸载 `.deb` 时会先停止已安装的 Airhand 进程，PipeWire 随连接关闭移除虚拟麦克风。Linux 上没有开机启动项和系统权限要清理。托盘图标、控制台的临时目录（`$XDG_RUNTIME_DIR/airhand-run-*`、`/tmp/airhand-webview-*`）在 Airhand 退出时就删掉了；只有进程被强制结束过才会留下（下次启动时会清理），通常注销 / 重启时系统也会清空它们，也可以手动删掉：`rm -rf "$XDG_RUNTIME_DIR"/airhand-run-* /tmp/airhand-webview-*`。
+卸载 `.deb` 时会先停止已安装的 Airhand 进程，PipeWire 随连接关闭移除虚拟麦克风。Linux 上没有开机启动项和系统权限要清理。托盘图标、控制台的临时目录（`$XDG_RUNTIME_DIR/airhand-run-*`、`/tmp/airhand-webview-*`）在 Airhand 退出时就删掉了，对方复制过来的文件所在的 FUSE 挂载点（`$XDG_RUNTIME_DIR/airhand-clip/<进程号>`）也在退出时卸掉；只有进程被强制结束过才会留下（下次启动时会清理），通常注销 / 重启时系统也会清空它们，也可以手动清理（先卸掉挂载点再删）：`fusermount3 -uz "$XDG_RUNTIME_DIR"/airhand-clip/* 2>/dev/null; rm -rf "$XDG_RUNTIME_DIR"/airhand-run-* "$XDG_RUNTIME_DIR"/airhand-clip /tmp/airhand-webview-*`。
 
 ### Android
 

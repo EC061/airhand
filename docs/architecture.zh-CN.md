@@ -284,7 +284,7 @@ Windows 上这些都运行在系统服务里（见 [Windows 服务](#windows-服
 | 平台 | 做法 |
 |---|---|
 | Windows | OLE 虚拟文件（`FileGroupDescriptorW` + `FileContents`，和远程桌面一样，`client/src-tauri/src/clipfiles/windows.rs`）：资源管理器粘贴时才要整棵树和每个文件的内容，`IStream::Read` 读多少取多少，进度条和取消都是资源管理器自己的。不提供 `CF_HDROP`，本机的剪贴板同步也就不会把它当成本机复制了文件、又公告回去。退出时不调 `OleFlushClipboard`（那会把所有格式都要一遍）。被控端在系统服务里时由托盘放，见 [Windows 服务](#windows-服务) |
-| Linux | 只读的 FUSE 文件系统（`fuser`），挂在 `$XDG_RUNTIME_DIR/airhand-clip/<进程号>`，每个公告一个子目录；X11 剪贴板里放 `text/uri-list`、`x-special/gnome-copied-files` 和路径文本。文件管理器列哪个目录才向对方列，读到哪里才取到哪里。上次没退干净留下的挂载点启动后卸掉。没有 FUSE 时不放，只同步文本 |
+| Linux | 只读的 FUSE 文件系统（`fuser`），挂在 `$XDG_RUNTIME_DIR/airhand-clip/<进程号>`，每个公告一个子目录；X11 剪贴板里放 `text/uri-list`、`x-special/gnome-copied-files` 和路径文本。文件管理器列哪个目录才向对方列，读到哪里才取到哪里。退出时卸载（收到 SIGTERM / SIGINT 也一样）；崩溃、被强制结束留下的挂载点下次启动时卸掉。没有 FUSE 时不放，只同步文本 |
 | macOS | 在内存中保留最新公告后回复 `Ready`。用户在菜单栏选“接收文件到…”并确认目标目录后，才列目录、分块取文件。每个顶层项目先写入同卷的私有临时目录，完整后以独占改名发布。临时目录的恢复记录和清理见[卸载](usage.zh-CN.md#macos)。 |
 | Android | `ClipFilesProvider` 提供 content URI（`content://<包名>.clipfiles/...`），别的应用读的时候才取。Android 8 起是代理文件描述符（`StorageManager.openProxyFileDescriptor`，可以跳着读），之前是管道。剪贴板里只放文件，文件夹只能在通知里“保存到下载”（Android 10 起经 MediaStore，之前存在应用自己的目录） |
 | 网页控制台 | 不进本机剪贴板（网页写不了文件）：提示“对方复制了 N 项”，点“下载”才取。Chrome / Edge 存进用户选的文件夹 / 文件，边取边写；别的浏览器在内存里拼好（几个文件、文件夹打成不压缩的 ZIP），最多 1 GiB |
@@ -298,7 +298,7 @@ Windows 上这些都运行在系统服务里（见 [Windows 服务](#windows-服
 - 单实例锁用的是内核对象而不是锁文件：Windows 是命名互斥量，Linux 是抽象命名空间的 Unix 套接字，macOS 是登记在 bootstrap 服务里的 Mach 端口名
 - 控制台的 WebView 需要数据目录：放在临时目录下的随机子目录，开启隐私模式（不保存 Cookie 和缓存），关闭窗口或退出程序时删除；进程被强制结束时，下次启动会清理残留。macOS 的 WKWebView 不需要数据目录，隐私模式下不保存网页数据
 - macOS 上还有几样东西不在 Airhand 的目录里，是系统记着的、或者系统框架以 Airhand 的名义建的：登录时自动启动（系统的登录项）、“屏幕与系统录音”“辅助功能”等权限记录、WebKit 和 Metal 在系统临时 / 缓存目录里建的几个目录（大多是空的）、用户挪动或关掉菜单栏图标时系统记下的设置（`~/Library/Preferences/app.airhand.client.plist`，Airhand 自己不用）。完整的清单和卸载时怎么一起清掉见[卸载 → macOS](usage.zh-CN.md#macos)
-- Linux 上几样只能以文件形式交出去的东西（交给 AppIndicator 的托盘图标、WebKitGTK 的 GStreamer 插件缓存）放在 `XDG_RUNTIME_DIR`（内存盘）里本进程专用的随机目录，退出时删除（收到 SIGTERM / SIGINT 也一样）。对方复制的文件挂在 `XDG_RUNTIME_DIR/airhand-clip/<进程号>`（FUSE，不占磁盘；见[剪贴板里的文件](#剪贴板里的文件)）；Mesa / NVIDIA 的着色器磁盘缓存直接关闭
+- Linux 上几样只能以文件形式交出去的东西（交给 AppIndicator 的托盘图标、WebKitGTK 的 GStreamer 插件缓存）放在 `XDG_RUNTIME_DIR`（内存盘）里本进程专用的随机目录，退出时删除（收到 SIGTERM / SIGINT 也一样）。对方复制的文件挂在 `XDG_RUNTIME_DIR/airhand-clip/<进程号>`（FUSE，不占磁盘，退出时卸载；见[剪贴板里的文件](#剪贴板里的文件)）；Mesa / NVIDIA 的着色器磁盘缓存直接关闭
 - 选的界面语言记在 `config.toml` 里（`language`）；控制台的其它设置（关闭的标签……）只保存在内存里
 - Android：只在应用自己的私有目录里保存设置、连接过的设备和本机的控制码，不备份、不迁移，卸载时由系统全部删除（见[数据保存在哪里](android.zh-CN.md#数据保存在哪里)）
 - 以上说的是桌面客户端。网页控制台是部署在服务器上的服务：它把自签名的 HTTPS 证书存在 `web/data/` 里，浏览器那边也只在内存里保存设置，我的设备不保存、刷新页面后清空（登录密码时会有一个会话 Cookie）

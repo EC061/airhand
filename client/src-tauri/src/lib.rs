@@ -690,6 +690,9 @@ pub fn run() {
     }
     #[cfg(target_os = "linux")]
     ephemeral::isolate_caches();
+    // Linux：上次被强制结束时留下的剪贴板文件挂载点（FUSE）
+    #[cfg(target_os = "linux")]
+    clipfiles::linux::sweep_stale();
 
     let hub = status::new_hub();
     #[cfg(windows)]
@@ -837,6 +840,9 @@ pub fn run() {
             if let Err(e) = host::mic::shutdown() {
                 warn!("stopping the virtual microphone: {e}");
             }
+            // Linux：对方复制的文件所在的 FUSE 文件系统。挂载在静态变量里，退出时不会自己卸
+            #[cfg(target_os = "linux")]
+            clipfiles::linux::shutdown();
             // Linux：托盘图标、GStreamer 缓存所在的目录（内存盘 XDG_RUNTIME_DIR 里），退出时删掉
             #[cfg(target_os = "linux")]
             ephemeral::remove_with_retry(&ephemeral::process_dir(), Duration::from_secs(1));

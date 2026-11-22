@@ -176,7 +176,7 @@ sudo apt remove airhand     # stops the packaged app and releases its PipeWire m
 rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/airhand"  # remove this user's configuration and pairings
 ```
 
-There's no startup entry and no system permission to clean up on Linux. The tray icon's and the console's temporary directories (`$XDG_RUNTIME_DIR/airhand-run-*`, `/tmp/airhand-webview-*`) are deleted when Airhand quits; they're only left behind if the process was killed (they're cleaned up at the next start), and the system usually clears them when you log out or reboot. To remove them by hand: `rm -rf "$XDG_RUNTIME_DIR"/airhand-run-* /tmp/airhand-webview-*`.
+There's no startup entry and no system permission to clean up on Linux. The tray icon's and the console's temporary directories (`$XDG_RUNTIME_DIR/airhand-run-*`, `/tmp/airhand-webview-*`) are deleted when Airhand quits, and the FUSE mount holding files copied on the other side (`$XDG_RUNTIME_DIR/airhand-clip/<pid>`) is unmounted then too; they're only left behind if the process was killed (they're cleaned up at the next start), and the system usually clears them when you log out or reboot. To clean up by hand (unmount first, then delete): `fusermount3 -uz "$XDG_RUNTIME_DIR"/airhand-clip/* 2>/dev/null; rm -rf "$XDG_RUNTIME_DIR"/airhand-run-* "$XDG_RUNTIME_DIR"/airhand-clip /tmp/airhand-webview-*`.
 
 ### Android
 
