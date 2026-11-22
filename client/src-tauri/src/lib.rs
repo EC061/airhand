@@ -631,6 +631,9 @@ async fn switch_to_host(app: AppHandle) -> Result<(), Problem> {
 // ───────────────────────────── 入口 ─────────────────────────────
 
 pub fn run() {
+    // Windows：安装程序给卸载程序的环境变量不往下传（见 winsvc::forget_installer_env）
+    #[cfg(windows)]
+    winsvc::forget_installer_env();
     // Windows：安装包和服务管理器用的命令行（--install、--service、--agent……）
     #[cfg(windows)]
     if let Some(code) = winsvc::cli() {

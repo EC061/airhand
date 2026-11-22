@@ -28,6 +28,10 @@
 ; 卸载程序继承了它，就保留 config.toml（控制码、服务器设置、控制台的"我的设备"）。直接卸载时没有这个变量，配置文件一起删除。
 ; 重新运行同一个版本的安装程序、在里面选"卸载 Airhand"是真的卸载：安装程序还把自己的版本放进 AIRHAND_INSTALLER_VERSION，
 ; 卸载程序看到和自己的版本一样，就照样全部删除。被动安装（/P）遇到同一个版本时会自动先卸载再装，那是重装，不传版本、保留配置。
+; 这两个变量只给旧版本的卸载程序用（"已安装旧版本"页面上，复制文件之前），开始复制文件时（PREINSTALL）就清掉：
+; 没有提升权限时 RunAsUser 直接 ShellExecute，之后由安装程序打开的 Airhand 会继承它们，它再启动卸载程序的话
+; （仅为我安装的那份给为所有用户安装的那份让开时，见 src/winsvc/user.rs 的 step_aside），卸载就被当成了升级。
+; airhand.exe 启动时也会去掉它们（src/winsvc/mod.rs 的 forget_installer_env）。
 ; 删除配置文件时服务已经停了（PREUNINSTALL），服务里"配置文件被删掉就重新生成"的检查不会再把它写回来。
 ;
 ; 这个文件在模板的大部分定义之前引入：模板的 ${UNINSTKEY} 这些还没定义、语言还没加载，$MultiUser.InstallMode 也还没声明。
@@ -305,6 +309,9 @@ Function AirhandQuitBeforeInstall
   Quit
 FunctionEnd
 !macro NSIS_HOOK_PREINSTALL
+  ; 旧版本的卸载程序已经运行完了：清掉只给它用的环境变量，之后打开的 Airhand 不再继承（见文件开头）
+  System::Call 'kernel32::SetEnvironmentVariableW(w "AIRHAND_UPGRADE", p 0)'
+  System::Call 'kernel32::SetEnvironmentVariableW(w "AIRHAND_INSTALLER_VERSION", p 0)'
   ; 静默安装（/S）没有界面初始化：在这里按已有的安装选择方式、检查安装目录。不能问用户，需要管理员权限而没有、
   ; 或者目录不合适（/D= 指定的）时失败
   ${If} ${Silent}

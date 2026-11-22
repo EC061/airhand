@@ -97,6 +97,20 @@ const SERVICE_SDDL: &str = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCR
 /// `DELETE` 访问权限（删除服务）
 const DELETE: u32 = 0x0001_0000;
 
+/// 安装程序传给旧版本卸载程序的环境变量（见 `windows/hooks.nsh` 开头的说明）
+const INSTALLER_ENV: [&str; 2] = ["AIRHAND_UPGRADE", "AIRHAND_INSTALLER_VERSION"];
+
+/// 去掉从安装程序继承来的 [`INSTALLER_ENV`]，不再传给本进程启动的程序。没有提升权限的安装程序（仅为当前用户安装）
+/// 直接 ShellExecute 打开托盘，托盘继承了它的环境变量；托盘再启动卸载程序的话（[`user::step_aside`]），
+/// 卸载就被当成升级：config.toml 留下，安装目录、注册表项、防火墙规则也不清理。
+/// 安装包开始复制文件时已经清掉了它们，这里是第二道保险。在 `run()` 的最开头调用
+pub fn forget_installer_env() {
+    for name in INSTALLER_ENV {
+        // SAFETY: 在 run() 的最开头调用，此时只有主线程
+        unsafe { std::env::remove_var(name) };
+    }
+}
+
 /// 处理安装包和服务管理器使用的命令行参数。返回 `Some(退出码)` 表示已经处理完，进程应该退出；
 /// `None` 表示普通启动（托盘）。
 pub fn cli() -> Option<i32> {
