@@ -82,7 +82,7 @@
 
 需要一台 Mac：
 
-- Xcode 16 或更新（带 iOS SDK）
+- Xcode 26 或更新（带 iOS SDK；代码用到了 iOS 26 SDK 的接口，装好的应用仍然支持 iOS 17 及以上）
 - Rust（[rustup](https://rustup.rs)）和两个目标：`rustup target add aarch64-apple-ios aarch64-apple-ios-sim`
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)（`brew install xcodegen`，或者下载它的发布包）：`ios/project.yml` 生成 Xcode 工程
 

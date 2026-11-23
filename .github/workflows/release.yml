@@ -325,12 +325,17 @@ jobs:
   ios:
     name: iOS
     needs: prepare
-    runs-on: macos-15
+    # 要 Xcode 26 或更新（代码用到了 iOS 26 SDK 的接口，如 allowBluetoothHFP）：macos-15 默认是 Xcode 16.4，
+    # macos-26 默认是 Xcode 26
+    runs-on: macos-26
     timeout-minutes: 60
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Xcode version
+        run: xcodebuild -version
 
       - uses: dtolnay/rust-toolchain@stable
         with:
