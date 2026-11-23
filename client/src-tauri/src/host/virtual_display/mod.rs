@@ -104,6 +104,9 @@ struct Wanted {
     linger: Option<Instant>,
     /// 最后一个会话结束的时刻
     idle_since: Option<Instant>,
+    /// 被控端在运行、开着"不自动睡眠"（macOS）：没有会话也预备着虚拟显示器（见 `set_ready`）
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    ready: bool,
     /// 上次没能打开防窥的原因（再打开、关掉时清掉）
     failed: Option<String>,
     /// 防窥开着（只留着虚拟显示器，由管理线程设置）
@@ -283,6 +286,23 @@ pub fn release_privacy() {
     w.linger = None;
     tracing::info!("privacy mode ends with the remote control");
     publish(&w);
+    w.poke();
+}
+
+/// 被控端在运行、开着"不自动睡眠"（macOS，见 `power`）：没有会话时也预备着镜像的虚拟显示器，合上盖子之后
+/// 连上来也有画面（虚拟显示器得在合盖之前就建好，见 [`mac`]）。笔记本才需要，台式机什么也不做
+#[cfg(target_os = "macos")]
+pub fn set_ready(on: bool) {
+    let mut w = HUB.wants.lock().unwrap();
+    if w.ready == on {
+        return;
+    }
+    w.ready = on;
+    if on && !w.running && crate::host::macos::lid_state().is_some() && mac::usable() {
+        w.running = true;
+        w.stopping = false;
+        mac::spawn();
+    }
     w.poke();
 }
 

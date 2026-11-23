@@ -34,11 +34,14 @@
 //! 合着盖子也不睡眠。
 //!
 //! **不自动睡眠**（托盘菜单，默认关，`config.toml` 的 `prevent_sleep`）：电脑睡眠时进程被冻结，和服务器的连接断开，
-//! 控制端只能看到它离线。打开后被控端运行期间（不只是有会话时，见 [`Hosting`]）一直要着 `PreventUserIdleSystemSleep`：
-//! 电脑不因为空闲而睡眠，一直在线等着被连接；显示器照常熄灭（连上来时叫醒它）。只在接着外接电源时要
-//! （每 [`POWER_CHECK`] 看一次电源，接上、拔掉电源时跟着变），用电池时照常睡眠。
+//! 控制端只能看到它离线。打开后被控端运行期间（不只是有会话时，见 [`Hosting`]）一直要着 `PreventUserIdleSystemSleep`
+//! 和 `PreventSystemSleep`：电脑不因为空闲而睡眠，合上笔记本的盖子也不睡，一直在线等着被连接；显示器照常熄灭
+//! （连上来时叫醒它）。合上盖子之后连上来也要有画面：虚拟显示器得在合盖之前就建好，所以这时没有会话也预备着
+//! （`virtual_display::set_ready`）。只在接着外接电源时要（每 [`POWER_CHECK`] 看一次电源，接上、拔掉电源时
+//! 跟着变），用电池时照常睡眠。
 //!
-//! 管不了的：没有会话时合上笔记本的盖子（没接外接显示器和电源时）、苹果菜单里选"睡眠"、电量低，断言都挡不住。
+//! 管不了的：用电池时合上笔记本的盖子、没有会话又没开"不自动睡眠"时合上盖子、苹果菜单里选"睡眠"、
+//! 电量低，断言都挡不住。
 //! 这些都不需要什么权限，`pmset -g assertions` 里能看到它们（名字以 Airhand 开头）。
 
 use std::sync::LazyLock;
@@ -294,15 +297,15 @@ mod imp {
     struct Idle {
         /// 有几个 [`super::Hosting`]
         hosts: usize,
-        /// 要着的 `PreventUserIdleSystemSleep`
-        assertion: Option<AssertionId>,
+        /// 要着的 `PreventUserIdleSystemSleep`、`PreventSystemSleep`（空的：没要）
+        assertions: Vec<AssertionId>,
         /// 有线程在定时看电源（见 [`watch`]）
         watching: bool,
     }
 
     static IDLE: Mutex<Idle> = Mutex::new(Idle {
         hosts: 0,
-        assertion: None,
+        assertions: Vec::new(),
         watching: false,
     });
 
@@ -356,28 +359,32 @@ mod imp {
     fn apply(st: &mut Idle) {
         let wanted = wanted(st);
         let hold = wanted && on_ac();
-        match (hold, st.assertion) {
-            (true, None) => {
-                st.assertion = create(NO_IDLE_SLEEP, "Airhand: Prevent automatic sleeping");
-                if st.assertion.is_some() {
-                    info!("preventing idle sleep while the host runs on AC power");
-                }
-            }
-            (false, Some(id)) => {
-                release(id);
-                st.assertion = None;
+        if hold && st.assertions.is_empty() {
+            // PreventSystemSleep：合上盖子也不睡（见模块说明）
+            st.assertions = [NO_IDLE_SLEEP, NO_SLEEP]
+                .into_iter()
+                .filter_map(|k| create(k, "Airhand: Prevent automatic sleeping"))
+                .collect();
+            if !st.assertions.is_empty() {
                 info!(
-                    on_battery = wanted,
-                    "the computer may sleep when idle again"
+                    "preventing sleep (also with the lid closed) while the host runs on AC power"
                 );
             }
-            _ => {}
+        } else if !hold && !st.assertions.is_empty() {
+            for id in std::mem::take(&mut st.assertions) {
+                release(id);
+            }
+            info!(on_battery = wanted, "the computer may sleep again");
         }
+        // 合上盖子之后连上来也要有画面：没有会话时也预备着虚拟显示器（接不接着电源它自己看）。
+        // 单元测试里不建（会真的在本机多出一块显示器、屏幕闪一下）
+        #[cfg(not(test))]
+        crate::host::virtual_display::set_ready(wanted);
     }
 
     #[cfg(test)]
     pub fn holding() -> bool {
-        IDLE.lock().unwrap().assertion.is_some()
+        !IDLE.lock().unwrap().assertions.is_empty()
     }
 
     #[cfg(test)]
@@ -523,6 +530,7 @@ mod tests {
             "PreventUserIdleSystemSleep",
             "Prevent automatic sleeping"
         ));
+        assert!(has("PreventSystemSleep", "Prevent automatic sleeping"));
         drop(awake);
         drop(host);
         set_prevent_sleep(was);

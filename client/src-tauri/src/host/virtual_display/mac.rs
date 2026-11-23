@@ -10,7 +10,8 @@
 //! （实测：合盖之后建的，叫醒以后一帧都采不到；合盖之前建好的，合上之后马上换到它上面，画面照常）。所以：
 //!
 //! * **预备**：开着盖子的笔记本，接着电源（用电池时合上盖子照样睡眠，备着也没用），没接别的显示器（接着的话合上
-//!   盖子就是系统本来的合盖模式）时，有会话就建好虚拟显示器，**镜像**内建的显示器：本机看不出来（只在开始时闪一下），
+//!   盖子就是系统本来的合盖模式）时，有会话就建好虚拟显示器；开着“不自动睡眠”（被控端在运行，见 [`super::set_ready`]，
+//!   接着电源时合上盖子也不睡）时没有会话也建好，合上盖子之后连上来才有画面。**镜像**内建的显示器：本机看不出来（只在开始时闪一下），
 //!   显示器列表里也没有它（镜像的显示器不算，见 `macos::displays`），控制端照样只看到一个显示器。合上盖子时系统
 //!   自己把它拿出镜像、当主显示器，窗口都在它上面；打开盖子又自己放回镜像。没放回去的（例如是合着盖子时才建的）
 //!   这里放回去；
@@ -23,8 +24,8 @@
 //! * 合上、打开盖子，主显示器换了：马上告诉会话，重新列出显示器；
 //! * 有虚拟显示器的时候要着 `PreventSystemSleep`（[`power::keep_running`]）：接着外接电源时合着盖子也不睡眠
 //!   （有会话期间本来就要着，见 `power`；这个管最后一个会话结束后等重连的那一会儿）；
-//! * 最后一个会话结束后再留一会儿（等断线重连，见 `super::SESSION_LINGER`），之后撤掉，线程退出。进程退出时
-//!   系统自己撤掉它，不用恢复什么。
+//! * 最后一个会话结束后再留一会儿（等断线重连，见 `super::SESSION_LINGER`），之后撤掉（开着“不自动睡眠”时
+//!   接着预备），没事可做时线程退出。进程退出时系统自己撤掉它，不用恢复什么。
 //!
 //! 本进程建的虚拟显示器在本进程里读不到显示模式（`CGDisplayCopyDisplayMode` 返回空，别的进程读得到），
 //! 显示器列表里的像素大小用 [`pixels`]。
@@ -46,6 +47,8 @@ use crate::host::{macos, power};
 
 /// 有会话的时候多久看一次盖子、显示器、电源
 const WATCH: Duration = Duration::from_millis(500);
+/// 没有会话、只是预备着（开着"不自动睡眠"）时多久看一次：合盖时系统自己换到虚拟显示器上，不用赶
+const WATCH_READY: Duration = Duration::from_secs(2);
 /// 本机的显示器回来了这么久才撤掉虚拟显示器、打开盖子之后这么久还没回到镜像才自己放回去（开盖、合盖的过程中
 /// 显示器会来回变）
 const SETTLE: Duration = Duration::from_secs(2);
@@ -265,9 +268,9 @@ fn run() {
     let mut unmirrored_since: Option<Instant> = None;
     loop {
         let now = Instant::now();
-        let (sessions, stopping) = {
+        let (sessions, ready, stopping) = {
             let w = HUB.wants.lock().unwrap();
-            (w.sessions(now), w.stopping)
+            (w.sessions(now), w.ready, w.stopping)
         };
         let ours = filling.as_ref().map(|f| f.display.id);
         let lid_state = macos::lid_state();
@@ -321,7 +324,11 @@ fn run() {
         if standby.is_none() {
             unmirrored_since = None;
         }
-        let wanted = sessions && !stopping && (fill || standby.is_some());
+        // 有会话：预备、补屏；只是开着"不自动睡眠"：预备，合上盖子之后留着系统换上去的那块（合盖之后再建的没有画面，
+        // 不建）
+        let wanted = !stopping
+            && ((sessions && (fill || standby.is_some()))
+                || (ready && (standby.is_some() || (fill && filling.is_some()))));
         match (&filling, wanted) {
             (None, true) if retry_at.is_none_or(|t| now >= t) => {
                 match VirtualDisplay::create(shape) {
@@ -358,7 +365,7 @@ fn run() {
                 // 本机的显示器回来了（又不用预备，例如用着电池、接上了显示器）：等它稳定了再撤；
                 // 会话都结束了（也等过了重连）、要退出了：马上撤
                 let settled = usable_since.is_some_and(|t| now.duration_since(t) >= SETTLE);
-                if stopping || !sessions || settled {
+                if stopping || !(sessions || ready) || settled {
                     info!("removing the virtual display");
                     filling = None;
                     bump();
@@ -379,15 +386,17 @@ fn run() {
             _ => {}
         }
         if filling.is_none() {
-            // 没事可做了：退出（下一个会话加入时再启动）。在锁里看，免得和 join 错过
+            // 没事可做了：退出（下一个会话加入、打开"不自动睡眠"时再启动）。台式机上预备不用管。
+            // 在锁里看，免得和 join、set_ready 错过
             let mut w = HUB.wants.lock().unwrap();
-            if w.stopping || !w.sessions(Instant::now()) {
+            let laptop = lid_state.is_some();
+            if w.stopping || (!w.sessions(Instant::now()) && !(w.ready && laptop)) {
                 w.running = false;
                 HUB.wake.notify_all();
                 break;
             }
         }
-        wait(WATCH);
+        wait(if sessions { WATCH } else { WATCH_READY });
     }
     info!("virtual display manager stopped");
 }
