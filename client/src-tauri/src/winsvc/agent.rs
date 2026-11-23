@@ -15,7 +15,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::w;
 
-use crate::host::HostService;
+use crate::host::{HostCode, HostService};
 use crate::{config, status};
 
 fn arg<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -62,7 +62,7 @@ pub fn run(args: &[String]) -> i32 {
     }
     config::keep_file();
     let hub = status::new_hub();
-    let host = HostService::start(hub.clone());
+    let host = HostService::start(hub.clone(), HostCode::default());
     let agent = super::ipc::Agent {
         cmds: host.commands(),
         autostart: Arc::new(watch::Sender::new(config::settings().autostart)),

@@ -49,7 +49,7 @@ use tauri::webview::{PermissionKind, PermissionResponse};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tracing::{info, warn};
 
-use host::{HostCmd, HostService};
+use host::{HostCmd, HostCode, HostService};
 use i18n::Lang;
 use status::{HostStatus, Mode, StatusHub};
 
@@ -61,6 +61,8 @@ static EXITING: AtomicBool = AtomicBool::new(false);
 pub struct AppState {
     hub: StatusHub,
     services: Mutex<Services>,
+    /// 本机的控制码：本进程里的被控端停下再启动（macOS / Linux 打开、关掉控制台）时接着用它
+    host_code: HostCode,
     console_opening: AtomicBool,
     webview_dirs: Mutex<Vec<PathBuf>>,
     /// Windows 安装版：被控端在系统服务里运行（托盘只负责显示和操作），切换模式不影响它
@@ -178,7 +180,10 @@ fn switch_services(app: &AppHandle, mode: Mode) {
         });
         match mode {
             Mode::Host if host_follows => {
-                sv.host = Some(Hosting::InProcess(HostService::start(state.hub.clone())));
+                sv.host = Some(Hosting::InProcess(HostService::start(
+                    state.hub.clone(),
+                    state.host_code.clone(),
+                )));
                 #[cfg(target_os = "macos")]
                 host::macos::request_permissions();
             }
@@ -748,6 +753,7 @@ pub fn run() {
         .manage(AppState {
             hub: hub.clone(),
             services: Mutex::default(),
+            host_code: HostCode::default(),
             console_opening: AtomicBool::new(false),
             webview_dirs: Mutex::default(),
             service_mode,
@@ -790,7 +796,8 @@ pub fn run() {
             let hosting = if service_mode {
                 start_service_link(&handle, &hub)
             } else {
-                Hosting::InProcess(HostService::start(hub.clone()))
+                let code = app.state::<AppState>().host_code.clone();
+                Hosting::InProcess(HostService::start(hub.clone(), code))
             };
             app.state::<AppState>().services.lock().unwrap().host = Some(hosting);
             // 仅调试构建：方便开发时直接进入控制端
