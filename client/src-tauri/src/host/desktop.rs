@@ -41,6 +41,24 @@ fn name(desk: HDESK) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len]))
 }
 
+/// 当前线程是不是已经在输入桌面上（打不开输入桌面时当作在：换不过去，也就不用换）。
+/// 线程上有钩子时不能切换桌面（见模块说明）：先用它看一眼，要换的话先卸掉钩子再 [`follow`]
+pub fn on_input_desktop() -> bool {
+    unsafe {
+        let Ok(input) = OpenInputDesktop(
+            DESKTOP_CONTROL_FLAGS(0),
+            false,
+            DESKTOP_ACCESS_FLAGS(GENERIC_ALL.0),
+        ) else {
+            return true;
+        };
+        let target = name(input);
+        let _ = CloseDesktop(input);
+        let current = GetThreadDesktop(GetCurrentThreadId()).ok().and_then(name);
+        target.is_none() || current == target
+    }
+}
+
 /// 把当前线程切到输入桌面。返回线程现在是否在输入桌面上（打不开输入桌面、切换失败时为 false）。
 pub fn follow() -> bool {
     unsafe {

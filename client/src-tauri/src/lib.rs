@@ -824,6 +824,8 @@ pub fn run() {
                 sv.host = None;
                 sv.controller = None;
             }
+            // 虚拟显示器恢复原样（被控端在本进程里运行时；没用过它就什么也不做）
+            host::virtual_display::shutdown();
             popout::close_all(app);
             if let Some(w) = app.get_webview_window(CONSOLE) {
                 let _ = w.destroy();

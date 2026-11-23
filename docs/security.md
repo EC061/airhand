@@ -34,6 +34,12 @@ TLS to the relay ends at the relay, so sessions get a second, end-to-end layer (
 - Desktop console: the console window reaches the controller service inside the app over a WebSocket that only listens on 127.0.0.1. The URL carries a random token that only the console page gets (from a Tauri command), and only the console page's Origin is accepted, so neither other local programs nor web pages in a browser can connect. What travels on it is already decrypted, and never leaves this computer
 - Web console: end-to-end encryption ends at the web console service (it is the controller); the browser talks to it over HTTPS / WSS. So the machine running the web console can see the picture; if it's the same machine as the relay, web console users effectively have no end-to-end encryption
 
+## Privacy mode
+
+- A controller that can connect can already operate this computer with administrator (SYSTEM) rights; [privacy mode](usage.md#privacy-mode) lets it do so without the people at the computer seeing it: all local monitors go blank and the local keyboard and mouse stop working. To keep others from doing that on a computer, add `privacy_mode = false` to its `config.toml`
+- It's only turned on after the controller confirms the handshake, so a replayed handshake message can't blank the screen. It turns off by itself 30 seconds after the controllers that turned it on have all disconnected; people at the computer can end it by disconnecting it from the network or restarting it (after a restart the host first restores the monitors)
+- Display changes are never saved to Windows' display database, and they're undone after a crash or a power cut too, so the computer won't come up with a black screen later (see [How it works](architecture.md#virtual-display-privacy-mode-keeping-the-screen-on))
+
 ## Web console
 
 - The WebSocket only accepts pages from the same site (so other websites can't connect through your browser); an access password can be set (HTTP Basic login, then an HttpOnly, SameSite=Strict cookie; wrong passwords are answered with a delay); use HTTPS from other computers. The web console sees the picture too, so run it on a machine you trust. Everyone using it reaches the relay from that machine's IP, so they share the brute-force allowance

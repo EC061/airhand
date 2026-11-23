@@ -84,6 +84,8 @@ pub fn run(args: &[String]) -> i32 {
     info!("stopping the host");
     // 中止被控端：断开所有会话、关闭到服务器的连接（给 QUIC 一点时间把关闭帧发出去）
     drop(host);
+    // 虚拟显示器恢复原样：停用它，防窥撤下的本机显示器放回去（服务最多等 5 秒，这里最多等 5 秒）
+    crate::host::virtual_display::shutdown();
     std::thread::sleep(Duration::from_millis(300));
     for h in handles {
         unsafe {

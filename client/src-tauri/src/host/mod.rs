@@ -14,9 +14,11 @@ pub(crate) mod macos;
 pub(crate) mod mic;
 mod pace;
 mod pipeline;
+mod power;
 #[cfg(target_os = "macos")]
 pub(crate) mod sck;
 mod session;
+pub mod virtual_display;
 #[cfg(target_os = "linux")]
 pub(crate) mod x11;
 
@@ -141,6 +143,8 @@ impl Drop for HostService {
 }
 
 async fn run(hub: StatusHub, gate: Arc<DesktopGate>, cmds: mpsc::UnboundedReceiver<HostCmd>) {
+    // 上次意外退出时虚拟显示器还启用着、防窥撤下的本机显示器还没放回来：先恢复，再接会话
+    let _ = tokio::task::spawn_blocking(virtual_display::recover).await;
     // 保存过的控制码（config.toml）：第一次连接就取回它
     let reclaim = config::settings().code();
     let events = Arc::new(TrayStatus(hub, gate.clone()));

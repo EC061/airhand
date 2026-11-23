@@ -76,6 +76,8 @@ windows = { version = "0.62", features = [
   "Win32_Security_Authorization",
   "Win32_Security_Cryptography",
   "Win32_System_Performance",
+  # 有会话时不熄屏、不睡眠（PowerSetRequest，见 src/host/power.rs）
+  "Win32_System_Power",
   "Win32_System_Registry",
   "Win32_System_DataExchange",
   "Win32_System_LibraryLoader",

@@ -47,7 +47,8 @@ The host runs as the system service **Airhand**, as SYSTEM in the session of who
 - Opening Airhand starts the service; **Quit** in the tray stops it (as before, the computer can't be controlled after quitting); when the service stops (or is uninstalled) the tray icons close too
 - **Start with Windows** (tray menu, on by default): the service starts at boot, so the computer can be controlled before anyone signs in, and the tray icon appears after signing in. Disabling Airhand under Startup apps in Task Manager only keeps the tray from opening after sign-in (the service still starts at boot), and the tick in the tray menu doesn't follow it: turn Start with Windows off and on again in the menu to bring it back
 - The configuration file `config.toml` is in the install directory (created on installation, see [Configuration file](#configuration-file)) and maintained by the service; edit it as administrator
-- **Uninstalling** (Settings → Apps) stops and removes the service, the startup entry, `config.toml` and the program; nothing is left behind (see [Uninstalling](#uninstalling)). Installing a new version over an old one keeps `config.toml`, and with it the control code and My devices, even if you choose to uninstall the old version first
+- **Uninstalling** (Settings → Apps) stops and removes the service, the startup entry, `config.toml` and the program; nothing is left behind (you choose whether the virtual display driver goes too, see [Uninstalling](#uninstalling)). Installing a new version over an old one keeps `config.toml`, and with it the control code and My devices, even if you choose to uninstall the old version first
+- **Virtual display driver**: the first install asks whether to install it, see [Virtual display](#virtual-display) below
 
 ### Just for me
 
@@ -56,6 +57,20 @@ The host runs as the system service **Airhand**, as SYSTEM in the session of who
 - The configuration file `config.toml` is in the install directory too (see [Configuration file](#configuration-file)), maintained by the tray; you can edit it directly
 - Uninstalling and upgrading work the same as for all users (see [Uninstalling](#uninstalling))
 - If someone else then installs Airhand for all users, the copy installed just for you stops running (two hosts would run at the same time) and no longer starts when you sign in, and asks whether to uninstall it. This also happens while it's running: its host stops as soon as it notices
+
+### Virtual display
+
+When installing for all users, the installer asks whether to install the **virtual display driver** (from the open-source [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) project, MIT license, shipped with the installer). It stays disabled and shows nothing; the host only turns it on for these two things:
+
+- **Remote control with the monitor switched off**: many monitors (DisplayPort ones especially) disappear from Windows when switched off, leaving no desktop to capture. With the driver, whenever a controller is connected and no monitor is on the desktop (switched off, unplugged, or none at all), Airhand turns on a virtual display at the resolution of the monitor that was there; the controller's picture moves to it a few seconds later. It turns off again once a monitor is back, or 30 seconds after the last controller disconnects
+- **Privacy mode**: when a controller turns it on, all of this computer's monitors go blank (no signal) and its keyboard and mouse stop working, so only the controller can see and control it (see [Privacy mode](#privacy-mode) for controllers)
+
+Also, while a controller is connected Windows doesn't turn the screen off or go to sleep for lack of keyboard and mouse activity (this part doesn't need the driver): with the screen off the picture freezes, and on computers with Modern Standby, screen off means standby and the connection drops. Closing a laptop's lid or pressing the power button still puts it to sleep; to control a laptop with its lid closed, choose "Do nothing" under Power Options → Choose what closing the lid does.
+
+- **Installing**: asked once on the first install for all users (not again on upgrades). After you choose Yes, Windows may also ask whether to install device software from "SignPath Foundation" (the driver isn't signed by Microsoft): choose Install. If you skipped it, run `"C:\Program Files\Airhand\airhand.exe" --install-vdd` as administrator later (then quit Airhand from the tray and open it again); it isn't available when installed just for you (turning the device on and off needs administrator rights)
+- **Uninstalling**: uninstalling Airhand has a page with "Also remove the virtual display driver", unticked by default (if you keep it, reinstalling doesn't need it again). It's disabled either way, so no extra display is left. You can remove a kept driver later in Device Manager under "Display adapters" (tick "Delete the driver software for this device")
+- If another program (Sunshine, for example) already installed a Virtual Display Driver on this computer, Airhand leaves it alone, and neither of the above is available
+- The driver's settings are in `%ProgramData%\Airhand\VirtualDisplay`, maintained by Airhand
 
 A bare `airhand.exe` doesn't run without being installed: release builds ask you to run the installer. Debug builds (`npm run tauri dev`) run the host inside the tray process, like on macOS and Linux, with `config.toml` next to the program (`client/src-tauri/target/debug/`)
 
@@ -76,6 +91,7 @@ Everything Airhand saves is in one `config.toml` (with comments). The menu in th
 | `[server_trust]` | Written by Airhand: the relay's certificate fingerprint remembered on the first connection (when no fingerprint is set). Delete it if the relay really gets a new certificate |
 | `autostart` | Windows: start with Windows, or when you sign in when installed just for you (also in the tray menu). macOS: a record of Open at login; System Settings is what counts, so editing only this line has no effect. Without it, Open at login hasn't been turned on by default yet (see above) |
 | `language` | UI language, `"zh"` or `"en"`: written when you pick one in the tray menu or the console (see [Language](#language)). Without it, the system language. On Windows installed for all users it applies to every account on the computer (the file is shared) |
+| `privacy_mode` | Windows: whether controllers may turn on [privacy mode](#privacy-mode), `true` by default. It isn't in the file by default: add `privacy_mode = false` to keep others from turning it on |
 | `[code]` | This computer's control code, and the secret that gets it back. Delete `code` and `secret` to get a new code |
 | `[host]` | Maintained by Airhand: this computer's end-to-end identity as a host (`key`), the pairing code and whether pairing is paused, all stored encrypted. Deleting `key` creates a new identity: controllers that connected before will warn that this computer's identity changed |
 | `[[paired]]` | Maintained by Airhand: paired controllers (public key, name, when they paired); they connect without the pairing code. Delete an entry to forget that controller |
@@ -94,6 +110,8 @@ After these steps nothing of Airhand is left on the computer (except two things 
 ### Windows
 
 Settings → Apps → Airhand → Uninstall. The uninstaller stops and removes the Airhand service (when installed just for you, it closes the tray instead) and the startup entry (including whether it was enabled or disabled under Startup apps in Task Manager; otherwise it would still be disabled after reinstalling), and deletes the install directory (including `config.toml`), the registry keys the installer wrote, the Windows Firewall rules added for `airhand.exe`, and the console's temporary directories. Nothing else to do by hand.
+
+If the [virtual display](#virtual-display) driver was installed, a page before the confirmation offers "Also remove the virtual display driver", unticked by default: unticked keeps the disabled driver (with the record that recognizes it, `HKLM\SOFTWARE\Airhand\VirtualDisplay`, and its settings in `%ProgramData%\Airhand\VirtualDisplay`) for a later reinstall; ticked removes it too.
 
 (Choosing "uninstall the old version first" during an upgrade isn't an uninstall: `config.toml` is kept, see [Windows installation](#windows-installation).)
 
@@ -192,7 +210,7 @@ Tray → **Switch to controller** opens the console. Closing the console window 
 - **My devices**: computers you connect to are saved (in `config.toml`); next time, one click on the new-connection page connects with the quality settings you used last. Rename or remove them (with undo), and search when there are many. If one is offline, there's no error: its tab opens and waits, and connects as soon as it's back (using the saved reconnect token, which doesn't count as code guessing)
 - The window has no system title bar: drag an empty part of the tab bar to move it, double-click to maximize. The icon on the far left opens the menu: this computer's name, server status, language, switch to host. Closing the console while connections are open (including from the taskbar or Alt+F4) asks first
 - Shortcuts (when not controlling a computer): Ctrl+T new connection, Ctrl+W close tab, Ctrl+Tab / Ctrl+Shift+Tab switch tabs, Ctrl+1–9, Ctrl+Shift+T reopen the last closed connection. While the remote screen has focus, every key goes to the remote computer
-- Toolbar (like an address bar): remote name, control code, frame rate / bitrate / latency, encoder; monitor switch (when the remote computer has several, see [Multiple displays](#multiple-displays) below), **Quality**, shortcuts, clipboard (two-way sync / type as keystrokes), sound (mute / A/V sync), microphone (only when the remote computer can take it, see [Microphone](#microphone) below), mouse (see [Mouse](#mouse) below), actual size (1:1), fullscreen, disconnect
+- Toolbar (like an address bar): remote name, control code, frame rate / bitrate / latency, encoder; monitor switch (when the remote computer has several, see [Multiple displays](#multiple-displays) below), **Quality**, shortcuts, clipboard (two-way sync / type as keystrokes), sound (mute / A/V sync), microphone (only when the remote computer can take it, see [Microphone](#microphone) below), privacy mode (Windows hosts only, see [Privacy mode](#privacy-mode) below), mouse (see [Mouse](#mouse) below), actual size (1:1), fullscreen, disconnect
 - When controlling a Mac, enable **Send shortcut → Swap Ctrl and ⌘ Command** to copy with Ctrl+C on a Windows keyboard and use the Win key as Control. The shortcuts in the menu are unchanged. The switch is off by default and remembered per device in the desktop console; the web console forgets it on refresh.
 - In fullscreen the tab bar is hidden and the toolbar slides in when the mouse touches the top edge; click the remote name to switch to another connection without leaving fullscreen. The console also tries to lock the keyboard, so system shortcuts such as the Win key and Alt+Tab go to the remote computer. On macOS fullscreen doesn't open a separate desktop Space, and the menu bar and Dock stay hidden (so they don't cover the toolbar or the remote taskbar; they come back while you're in another app); leave fullscreen with the toolbar button. The window's green button enters the system's own fullscreen, with the menu bar and Dock as usual
 - **Playing games**: the default Auto mode locks the mouse by itself when the remote computer hides its cursor (turning the camera in a game); on a computer you mostly play games on, switch to Game mode, see [Mouse](#mouse) below
@@ -261,6 +279,18 @@ Send this computer's microphone to the remote computer: programs there (meetings
 - Only one controller at a time: another controller sees "Another controller is using the remote microphone" and takes over when that one stops
 - **macOS 14.2+ and Linux with PipeWire** publish **Airhand Microphone** when forwarding starts. Choose it as the input in the remote app. macOS may ask for permission for that app to record system audio. Turning forwarding off or disconnecting removes the device. PipeWire also removes it when Airhand exits. After a forced quit on Mac, reopening Airhand or choosing **Uninstall Airhand…** cleans up any leftover device and tap.
 - Android hosts and the native Android controller do not yet support microphone forwarding.
+
+### Privacy mode
+
+Keeps the people at the remote computer from seeing what you do: all of its monitors go blank (no signal) and its keyboard and mouse stop working, so only you can see and control it. Toolbar shield button → **Privacy mode**.
+
+- Only Windows hosts support it, installed for all users with the [virtual display](#virtual-display) driver; otherwise the switch is greyed out and the menu says why. There's no such button for Macs, Linux and phones
+- Turning it on switches the remote computer to a virtual display (at the resolution of its main monitor), the only display left on its desktop, with its own monitors taken off; this takes a few seconds. You see and control that virtual display. The Start menu, UAC prompts, the lock screen and the mouse pointer are all on it too, nothing shows on the remote monitors
+- The remote keyboard and mouse are blocked, except Ctrl+Alt+Del (Windows' secure attention sequence): it only switches to the secure desktop, which doesn't show on the remote monitors either
+- One switch per computer: several connected controllers see the same state, and any of them can turn it off
+- **Turns off by itself** 30 seconds after the controllers that turned it on have all disconnected, and the remote monitors come back. When a connection drops and comes back, the console asks for it as part of reconnecting, so the remote screen doesn't show in between
+- Someone at the remote computer can end it by disconnecting that computer from the network (the session drops after about a minute, and privacy mode with it) or by restarting it (Airhand restores the monitors when it starts)
+- To keep others from turning it on for a computer, add `privacy_mode = false` to its `config.toml` (see [Configuration file](#configuration-file))
 
 ## Language
 

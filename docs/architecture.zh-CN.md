@@ -139,7 +139,7 @@ Android 被控端只有一个编码器，但每个观看者分别计在途字节
 | `crates/airhand-link` | 客户端到中转服务器的链路：QUIC 连接、证书固定、断线重连，端到端加密（`secure`：身份、Noise 握手、每条通道的加密），从流里读写帧（`wire`），会话的通道和数据报从哪里来（`lanes`）、往哪条路发（`paths`：中转、直连），两端之间的直连（`direct`：打洞、只认对方证书指纹的 TLS、画面走哪条路）和几条路上的帧按计数合并（`merge`，画面只交出解得了的帧），被控端的在途控制和码率（`flow`）、每一帧参考哪一帧和丢帧后从哪里恢复（`refs`），剪贴板里的文件（`files`：公告、列目录、按额度取文件，两端共用），与界面无关的控制端会话和界面命令（`Command`），被控端的服务器连接和会话（`host`），`Problem`。桌面客户端、网页控制台和 Android 共用（除了 `wire` 和 `udp`（收发缓冲区调大了的 UDP socket）都在默认的 `client` feature 里，中转服务器只用这两个）；`tests/protocol.json` 是三边共用的协议样例 |
 | `server/` | 中转服务器（quinn + rustls）及其 `Dockerfile`。`src/broker/`：`registry`（控制码登记、连接请求）、`relay`（会话通道的配对和转发、数据报）、`limits`（限速）、`tokens`（密钥和重连凭证）；锁的先后在调试构建里有检查（`lock.rs`） |
 | `web/` | 网页控制台服务（axum：静态网页 + WebSocket，HTTP / HTTPS 同一端口）及其 `Dockerfile`、`docker-compose.yml`。和 `client/src-tauri/` 一样是独立的 Cargo 工作区 |
-| `client/src-tauri/` | 桌面客户端 Rust 部分：被控端 `host/`、托盘、控制台窗口和命令，对方复制的文件放进系统剪贴板（`clipfiles/`） |
+| `client/src-tauri/` | 桌面客户端 Rust 部分：被控端 `host/`（Windows 的虚拟显示器和防窥模式在 `host/virtual_display/`，随包带的驱动在 `windows/vdd/`）、托盘、控制台窗口和命令，对方复制的文件放进系统剪贴板（`clipfiles/`） |
 | `crates/airhand-mobile` | Android 和 iOS 共用的手机核心：控制端用 `airhand-link`（命令和事件是 JSON，会话数据由界面的线程阻塞地取）；被控端的网络部分（服务器连接、会话和它的各条通道用 `airhand_link::host`，手机只实现 `host::Platform`；画面分发、在途控制和码率控制与桌面版相同）。和协议、链路库一样属于根目录的工作区 |
 | `android/native/` | Android 的 Rust 核心：`airhand-mobile` 的 JNI 包装。和 `client/src-tauri/`、`web/` 一样是独立的 Cargo 工作区 |
 | `ios/native/` | iOS 的 Rust 核心：`airhand-mobile` 的 C 接口包装（`include/airhand.h`），编译成静态库给 App 和屏幕广播扩展链接；`examples/fake_host.rs` 是测 iOS 控制端用的模拟被控端。独立的 Cargo 工作区 |
@@ -184,6 +184,14 @@ Windows 上这些都运行在系统服务里（见 [Windows 服务](#windows-服
 - 托盘和被控端之间是每个会话一个的命名管道（`\\.\pipe\airhand-host-<会话>`），每行一条 JSON 消息。只有交互登录的用户能连接，不能再开一个同名管道实例冒充被控端，托盘还会核对管道属于 SYSTEM
 - 剪贴板里的文件交给托盘（`client/src-tauri/src/winsvc/clip.rs`，管道 `\\.\pipe\airhand-clip-<会话>`，安全设置同上）：SYSTEM 进程放进剪贴板的数据对象资源管理器调不了，所以对方复制的文件由托盘放、托盘粘贴时经管道向被控端取；本机复制的文件由托盘以登录的用户的身份读，不然控制端能借 SYSTEM 读到这个用户读不了的文件。没有托盘时只同步文本
 - 服务和被控端没有控制台：日志用 `OutputDebugString` 输出（见开发文档的[调试 Windows 服务](development.zh-CN.md#调试-windows-服务)）
+
+### 虚拟显示器、防窥模式、不熄屏
+
+- **不熄屏**（`client/src-tauri/src/host/power.rs`）：有会话时被控端要两个电源请求（`PowerRequestDisplayRequired` + `PowerRequestSystemRequired`），最后一个会话结束时放开；会话开始时屏幕熄着就叫醒它（防窥模式不叫）。熄屏后桌面不刷新，现代待机的电脑熄屏就待机、断网。合盖、按电源键这些用户自己让电脑睡眠的，电源请求挡不住
+- **虚拟显示器**（`client/src-tauri/src/host/virtual_display/`）：随安装包带的 MttVDD（`client/src-tauri/windows/vdd/`），为所有用户安装时问用户要不要装（`airhand.exe --install-vdd`）。设备是 Airhand 建的根设备 `ROOT\AIRHANDVIRTUALDISPLAY\0000`，平时停用（MttVDD 启用着就至少有一个显示器），要用时启用、用完停用；启用前重写它的设置文件，本机主显示器的分辨率排第一（驱动的首选）。一个管理线程每轮看一眼 CCD（`QueryDisplayConfig`）和想要什么，只走一步（`plan.rs`：启用、等它出来、只留它、停用、恢复），改完了通知会话马上重新列出显示器
+- **补屏**：有会话、本机却没有显示器在桌面上（显示器关了电源，热插拔信号断了，Windows 把它移走了）时启用虚拟显示器，本机的显示器回到桌面上 2 秒后停用；补着屏时接上了新的显示器就停用一下让它试试，放不回桌面（例如合着盖子）就过 8 秒再补。会话开始时没有显示器的话，会话先等虚拟显示器出来（最多 15 秒）再发 Hello，不先说“没有显示器”。最后一个会话结束后再留 30 秒
+- **防窥**：只留虚拟显示器在桌面上（`SetDisplayConfig` 提供的配置只含虚拟显示器的路径），本机的显示器没有信号；低级键盘、鼠标钩子丢掉本机的输入，只放过带着 Airhand 记号（`dwExtraInfo`）的注入（`block.rs`，跟着输入桌面走，安全桌面上也装）。状态整台被控端一份（`HostMsg::Privacy`）；打开它的会话都结束后再保持 30 秒，控制端重连时在握手的介绍里带着 `privacy`，确认了握手才打开（重放的握手消息不能让本机黑屏）
+- **不存进显示设置数据库**：改显示设置从不带 `SDC_SAVE_TO_DATABASE`，恢复用的正是 Windows 记着的设置（`SDC_USE_DATABASE_CURRENT`）；存进去的话下次接着同样的显示器时 Windows 会自己套用“本机的显示器不在桌面上”。撤下本机显示器之前在注册表记一笔（`HKLM\SOFTWARE\Airhand\VirtualDisplay` 的 `Isolated`），被控端启动、卸载、升级前停服务时看到它（或者虚拟显示器还启用着）就先恢复；正常退出时管理线程恢复原样再结束
 
 ## 画面
 

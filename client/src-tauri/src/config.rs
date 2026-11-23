@@ -106,6 +106,9 @@ pub struct Settings {
     pub autostart: bool,
     /// 界面语言（`language`）：托盘菜单、控制台里选过的。`None`：没选过，跟随系统语言
     pub language: Option<Lang>,
+    /// 允许控制端打开防窥模式（`privacy_mode`，Windows 装了虚拟显示器驱动时有用，见 `host::virtual_display`）。
+    /// 模板里没有它：要禁止时手动写上 `privacy_mode = false`
+    pub privacy_mode: bool,
     /// 服务器分配的控制码和加密过的密钥（`[code]`），用 [`Settings::code`] 解开
     saved_code: Option<(i64, String)>,
 }
@@ -117,6 +120,7 @@ impl Default for Settings {
             server_fp: DEFAULT_SERVER_FP.to_string(),
             autostart: true,
             language: None,
+            privacy_mode: true,
             saved_code: None,
         }
     }
@@ -223,6 +227,9 @@ fn parse(text: &str) -> Result<Settings> {
     }
     if let Some(v) = doc.get("autostart").and_then(|v| v.as_bool()) {
         s.autostart = v;
+    }
+    if let Some(v) = doc.get("privacy_mode").and_then(|v| v.as_bool()) {
+        s.privacy_mode = v;
     }
     if let Some(v) = doc.get("language").and_then(|v| v.as_str()) {
         s.language = Lang::from_code(v);

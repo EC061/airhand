@@ -74,8 +74,14 @@ fn incoming(
 /// 控制端握手的第一条消息（第一次连这个控制码，不配对）
 fn initiate(code: u32) -> (Initiator, Vec<u8>) {
     let me = Identity::generate();
-    let intro =
-        secure::controller_intro("ctl", "test", QualitySettings::default(), false, Vec::new());
+    let intro = secure::controller_intro(
+        "ctl",
+        "test",
+        QualitySettings::default(),
+        false,
+        Vec::new(),
+        false,
+    );
     secure::initiate(InitiatorParams {
         code,
         me: &me,

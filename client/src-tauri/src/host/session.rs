@@ -5,6 +5,9 @@
 //! 控制端可以同时看好几个显示器（见 `airhand_proto::session` 的"多屏"）：每一路画面一条编码管线（[`Pipeline`]），
 //! 各自的在途控制和码率（[`Flows`]）；采集按显示器和别的会话共用（见 [`capture`]），光标整个会话一份
 //! （[`SharedCursor`]）。鼠标的绝对坐标按它说的那一路画面的显示器换算。
+//!
+//! 会话期间不熄屏、不睡眠（[`power`]）；本机的显示器关了电源时补一块虚拟显示器、防窥模式都在
+//! [`virtual_display`]：它改了显示设置就告诉会话，会话马上重新列出显示器（画面跟着换到虚拟显示器上、换回来）。
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,6 +32,8 @@ use super::gate::DesktopGate;
 use super::input::InjectorThread;
 use super::mic::{self, MicInput, MicLease};
 use super::pipeline::{self, Pipeline};
+use super::power::{self, Awake};
+use super::virtual_display::{self, Lease, Privacy};
 use crate::clipboard::{self, ClipSync};
 use crate::config;
 use airhand_link::controller::Clip;
@@ -109,6 +114,21 @@ fn ticker(period: Duration) -> Interval {
     t
 }
 
+/// 等虚拟显示器出来（最多 [`virtual_display::APPEAR_WAIT`]）：列出的显示器，等不到就是空的
+async fn wait_for_displays() -> Vec<DisplayInfo> {
+    let deadline = tokio::time::Instant::now() + virtual_display::APPEAR_WAIT;
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let now = tokio::task::spawn_blocking(capture::displays)
+            .await
+            .unwrap_or_default();
+        if !now.is_empty() {
+            return now;
+        }
+    }
+    Vec::new()
+}
+
 pub async fn run(inc: Incoming, gate: Arc<DesktopGate>) -> Result<()> {
     let session_id = inc.session_id;
     let ip = inc.peer.ip;
@@ -164,6 +184,17 @@ struct Desktop {
     /// 缺少的系统权限（macOS），见 [`super::missing_permissions`]
     missing: (bool, bool),
     mic: Mic,
+    /// 虚拟显示器：补屏、防窥（见 [`virtual_display`]）
+    screens: Lease,
+    /// 防窥模式的状态变了、改过显示设置
+    privacy_changes: watch::Receiver<Privacy>,
+    display_changes: watch::Receiver<u64>,
+    /// 告诉过控制端的防窥状态（一样的不再发）
+    privacy_sent: Option<Privacy>,
+    /// 控制端在握手里要了防窥模式：确认了握手才打开（重放的握手消息不能让本机黑屏）
+    privacy_at_start: bool,
+    /// 会话期间不熄屏、不睡眠
+    _awake: Option<Awake>,
 }
 
 /// 控制端的麦克风（见 [`super::mic`]）
@@ -215,10 +246,13 @@ enum Tick {
     Mic(mic::Status),
     /// 别的会话放开了麦克风，或者该再找一次设备了
     MicCheck,
+    /// 防窥模式的状态变了
+    Privacy,
 }
 
 impl Desktop {
     fn new(session_id: u64, senders: Senders) -> Self {
+        let screens = virtual_display::join(session_id);
         Self {
             session_id,
             identity: None,
@@ -247,7 +281,29 @@ impl Desktop {
                 owner: mic::owner_changed(),
                 tick: ticker(MIC_CHECK),
             },
+            privacy_changes: screens.privacy_changes(),
+            display_changes: screens.display_changes(),
+            screens,
+            privacy_sent: None,
+            privacy_at_start: false,
+            _awake: None,
         }
+    }
+
+    /// 告诉控制端防窥模式现在怎么样（和上次说的一样就不说了；这个平台没有防窥模式就不说）
+    fn send_privacy(&mut self) -> Result<()> {
+        let Some(p) = self.screens.privacy() else {
+            return Ok(());
+        };
+        if self.privacy_sent.as_ref() == Some(&p) {
+            return Ok(());
+        }
+        self.out.send(&HostMsg::Privacy {
+            state: p.state,
+            detail: p.detail.clone(),
+        })?;
+        self.privacy_sent = Some(p);
+        Ok(())
     }
 
     /// 告诉控制端麦克风现在怎么样（和上次说的一样就不说了）
@@ -405,7 +461,13 @@ impl Platform for Desktop {
     }
 
     async fn start(&mut self, start: Start) -> Result<()> {
-        let (displays, codecs, env_notice) = tokio::task::spawn_blocking(|| {
+        // 不熄屏。屏幕已经熄了的话叫醒它（不然没有新画面）；要防窥的不叫：本机的显示器马上要撤下来
+        self._awake = Some(power::keep_awake());
+        self.privacy_at_start = start.privacy;
+        if !start.privacy {
+            power::wake_display();
+        }
+        let (mut displays, codecs, env_notice) = tokio::task::spawn_blocking(|| {
             (
                 capture::displays(),
                 super::encoder::available_codecs(),
@@ -414,6 +476,14 @@ impl Platform for Desktop {
         })
         .await
         .unwrap_or_default();
+        if displays.is_empty() && self.screens.can_fill_in() {
+            // 本机的显示器关了电源（或者没接）：虚拟显示器马上补上，等它出来再开始，不先告诉控制端"没有显示器"
+            info!(
+                session_id = self.session_id,
+                "no displays, waiting for the virtual display"
+            );
+            displays = wait_for_displays().await;
+        }
         self.displays = displays;
         let view = resolve_view(&start.view, self.displays.len(), MAX_STREAMS);
         let (hostname, os) = crate::sysinfo::host_identity();
@@ -457,13 +527,18 @@ impl Platform for Desktop {
         }
         let status = mic::probe(self.session_id).await;
         self.send_mic(status)?;
+        self.send_privacy()?;
         Ok(())
     }
 
-    /// 控制端确认了握手：是真的在连（重放的握手消息走不到这里），这时才在托盘里显示它
+    /// 控制端确认了握手：是真的在连（重放的握手消息走不到这里），这时才在托盘里显示它、
+    /// 打开它在握手里要的防窥模式（断线重连时接着开着，见 [`virtual_display`]）
     fn confirmed(&mut self) {
         if let Some((gate, ip, admitted)) = self.identity.take() {
             gate.admitted(self.session_id, ip, &admitted);
+        }
+        if self.privacy_at_start {
+            self.screens.set_privacy(true);
         }
     }
 
@@ -510,6 +585,7 @@ impl Platform for Desktop {
                     self.subscribe_audio()?;
                 }
             }
+            Request::Privacy(on) => self.screens.set_privacy(on),
             Request::Mic(enabled) => {
                 self.mic.wanted = enabled;
                 if enabled && self.mic.lease.is_none() {
@@ -536,6 +612,9 @@ impl Platform for Desktop {
             // 只关心别的会话放开了麦克风：自己打开、放开的时候不在等
             _ = self.mic.owner.changed(), if self.mic.waiting() => Tick::MicCheck,
             _ = self.mic.tick.tick(), if self.mic.missing() => Tick::MicCheck,
+            _ = self.privacy_changes.changed() => Tick::Privacy,
+            // 虚拟显示器改了显示设置：马上重新列出显示器，不等定时检查
+            _ = self.display_changes.changed() => Tick::Displays,
         }
     }
 
@@ -601,6 +680,7 @@ impl Platform for Desktop {
                 }
             }
             Tick::Mic(status) => self.send_mic(status)?,
+            Tick::Privacy => self.send_privacy()?,
             // 能用了的话：控制端一直想开着就打开，不然告诉它现在能开了
             Tick::MicCheck => {
                 if self.mic.wanted {
