@@ -80,6 +80,10 @@ pub struct HostStatus {
     /// 配对过的控制端有几个
     #[serde(default)]
     pub paired: usize,
+    /// 远程控制结束后锁屏（托盘菜单里切换，见 `host::ending`）。`None`：还不知道（被控端还没启动、
+    /// 托盘还没连上服务里的被控端、服务里的被控端是旧版本），托盘里不显示这一项
+    #[serde(default)]
+    pub lock_on_end: Option<bool>,
 }
 
 impl Default for HostStatus {
@@ -91,6 +95,7 @@ impl Default for HostStatus {
             pairing: None,
             pairing_locked: false,
             paired: 0,
+            lock_on_end: None,
         }
     }
 }

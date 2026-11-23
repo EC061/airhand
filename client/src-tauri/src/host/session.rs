@@ -8,6 +8,7 @@
 //!
 //! 会话期间不熄屏、不睡眠（[`power`]）；本机的显示器关了电源时补一块虚拟显示器、防窥模式都在
 //! [`virtual_display`]：它改了显示设置就告诉会话，会话马上重新列出显示器（画面跟着换到虚拟显示器上、换回来）。
+//! 会话怎么结束的（正常结束还是出了错）交给 [`ending`]：远程控制结束了就锁屏、退出防窥模式。
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,6 +29,7 @@ use tracing::{info, warn};
 use super::audio::{self, AudioSubscription};
 use super::capture;
 use super::cursor::SharedCursor;
+use super::ending;
 use super::gate::DesktopGate;
 use super::input::InjectorThread;
 use super::mic::{self, MicInput, MicLease};
@@ -132,20 +134,26 @@ async fn wait_for_displays() -> Vec<DisplayInfo> {
 pub async fn run(inc: Incoming, gate: Arc<DesktopGate>) -> Result<()> {
     let session_id = inc.session_id;
     let ip = inc.peer.ip;
+    let presence = ending::Slot::default();
+    let slot = presence.clone();
     // 端到端握手：没配对过、又没有配对码的控制端，在这里就被拒绝了（见 gate）。
     // 握手通过就开始采集（不等控制端的确认，省一个往返），确认了才在托盘里显示它（见 Platform::confirmed）
-    serve(
+    let result = serve(
         inc,
         &*gate,
         VIDEO_QUEUE,
         audio::QUEUE,
         |admitted, senders| {
-            let mut desktop = Desktop::new(session_id, senders);
+            let mut desktop = Desktop::new(session_id, senders, slot);
             desktop.identity = Some((gate.clone(), ip, admitted.clone()));
             desktop
         },
     )
-    .await
+    .await;
+    // 控制端断开了、本机断开了它（`Ok`）：远程控制马上算结束；失联、连接出错：等它重连（见 ending）。
+    // 任务在这之前被中止了的（与服务器的连接断了）也算出错
+    presence.end(result.is_ok());
+    result
 }
 
 /// 桌面版一个会话里的东西
@@ -195,6 +203,8 @@ struct Desktop {
     privacy_at_start: bool,
     /// 会话期间不熄屏、不睡眠
     _awake: Option<Awake>,
+    /// 控制端确认了握手就算一次远程控制，结束后锁屏、退出防窥（见 [`ending`]）
+    presence: ending::Slot,
 }
 
 /// 控制端的麦克风（见 [`super::mic`]）
@@ -251,7 +261,7 @@ enum Tick {
 }
 
 impl Desktop {
-    fn new(session_id: u64, senders: Senders) -> Self {
+    fn new(session_id: u64, senders: Senders, presence: ending::Slot) -> Self {
         let screens = virtual_display::join(session_id);
         Self {
             session_id,
@@ -287,6 +297,7 @@ impl Desktop {
             privacy_sent: None,
             privacy_at_start: false,
             _awake: None,
+            presence,
         }
     }
 
@@ -537,6 +548,7 @@ impl Platform for Desktop {
         if let Some((gate, ip, admitted)) = self.identity.take() {
             gate.admitted(self.session_id, ip, &admitted);
         }
+        self.presence.confirmed(self.session_id);
         if self.privacy_at_start {
             self.screens.set_privacy(true);
         }
@@ -585,7 +597,12 @@ impl Platform for Desktop {
                     self.subscribe_audio()?;
                 }
             }
-            Request::Privacy(on) => self.screens.set_privacy(on),
+            Request::Privacy(on) => {
+                // 请求都在控制端的确认之后，只是可能比 `confirmed` 先处理：打开防窥的会话一定要算数，
+                // 它结束了才会退出防窥（见 ending）
+                self.presence.confirmed(self.session_id);
+                self.screens.set_privacy(on);
+            }
             Request::Mic(enabled) => {
                 self.mic.wanted = enabled;
                 if enabled && self.mic.lease.is_none() {

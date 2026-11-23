@@ -59,6 +59,23 @@ pub fn on_input_desktop() -> bool {
     }
 }
 
+/// 输入桌面是不是安全桌面 `Winlogon`（锁屏、登录界面、UAC 确认框）。打不开输入桌面时也当作是：
+/// 只有 SYSTEM 打得开安全桌面（见模块说明）
+pub fn input_is_secure() -> bool {
+    unsafe {
+        let Ok(input) = OpenInputDesktop(
+            DESKTOP_CONTROL_FLAGS(0),
+            false,
+            DESKTOP_ACCESS_FLAGS(GENERIC_ALL.0),
+        ) else {
+            return true;
+        };
+        let target = name(input);
+        let _ = CloseDesktop(input);
+        target.is_some_and(|n| n.eq_ignore_ascii_case("Winlogon"))
+    }
+}
+
 /// 把当前线程切到输入桌面。返回线程现在是否在输入桌面上（打不开输入桌面、切换失败时为 false）。
 pub fn follow() -> bool {
     unsafe {

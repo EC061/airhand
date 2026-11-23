@@ -106,6 +106,19 @@ impl Hosting {
         }
     }
 
+    /// 托盘菜单里切换"结束远程后锁屏"（见 `host::ending`）。`hub`：本进程里的被控端用的状态（就是托盘的）
+    fn set_lock_on_end(&self, hub: &StatusHub, on: bool) {
+        match self {
+            Hosting::InProcess(_) => {
+                let hub = hub.clone();
+                // 要写配置文件，不在主线程上做
+                std::thread::spawn(move || host::set_lock_on_end(&hub, on));
+            }
+            #[cfg(windows)]
+            Hosting::Service(link) => link.send(winsvc::ipc::ToAgent::SetLockOnEnd { on }),
+        }
+    }
+
     fn pairing(&self, cmd: PairingCmd) {
         match self {
             Hosting::InProcess(h) => {
@@ -353,6 +366,15 @@ pub(crate) fn on_menu(app: &AppHandle, id: &str) {
             if let Some(h) = &app.state::<AppState>().services.lock().unwrap().host {
                 h.send(cmd);
             }
+        }
+        "lock_on_end" => {
+            let state = app.state::<AppState>();
+            let current = state.hub.borrow().host.lock_on_end;
+            if let (Some(current), Some(h)) = (current, &state.services.lock().unwrap().host) {
+                h.set_lock_on_end(&state.hub, !current);
+            }
+            // 勾选项被点击时系统会自动翻转勾选状态：先按原来的设置重建菜单，改好了（被控端确认后）再刷新
+            state.hub.send_modify(|_| {});
         }
         "new_pairing" | "forget_paired" => {
             let cmd = if id == "new_pairing" {
@@ -824,7 +846,9 @@ pub fn run() {
                 sv.host = None;
                 sv.controller = None;
             }
-            // 虚拟显示器恢复原样（被控端在本进程里运行时；没用过它就什么也不做）
+            // 还有远程控制就当它结束了：先锁屏（见 host::ending），
+            // 再让虚拟显示器恢复原样（被控端在本进程里运行时；没用过它就什么也不做）
+            host::ending::shutdown();
             host::virtual_display::shutdown();
             popout::close_all(app);
             if let Some(w) = app.get_webview_window(CONSOLE) {

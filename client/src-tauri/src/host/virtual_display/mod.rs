@@ -14,9 +14,10 @@
 //! 鼠标（[`block`]）。控制端看到、操作的是虚拟显示器。
 //!
 //! * 整台被控端一份：哪个控制端打开的都一样，哪一个都能关；
-//! * 打开它的控制端都断开了，再等 [`PRIVACY_LINGER`]（控制端断线重连时在介绍里带着它，接着开着，
-//!   本机屏幕不会在重连的间隙里露出来），没回来就关掉。本机的人想结束它：断开网络，过一会儿会话断了，防窥也就关了；
-//!   或者重启电脑；
+//! * 打开它的控制端都走了：接着开着，远程控制结束了才关掉（[`release_privacy`]，见 `host::ending`）——
+//!   控制端断开了马上关（一个会话都不剩的话先锁屏），断线了等它重连一会儿（重连时在介绍里带着它，接着开着，
+//!   本机屏幕不会在重连的间隙里露出来）。本机的人想结束它：断开网络，过一会儿会话断了，防窥也就关了
+//!   （锁着屏）；或者重启电脑；
 //! * 关掉时停用虚拟显示器，按 Windows 记着的设置恢复本机的显示器（改设置时从不存进 Windows 的显示设置数据库，
 //!   见 [`topology`]）。进程意外退出、断电重启之后，下次启动时恢复（[`recover`]）；
 //! * 被控端的 `config.toml` 里 `privacy_mode = false` 时不允许（[`PrivacyState::NotAllowed`]）。
@@ -47,8 +48,9 @@ use std::time::{Duration, Instant};
 use airhand_proto::session::PrivacyState;
 use tokio::sync::watch;
 
-/// 打开防窥的控制端都断开之后，等它重连这么久
-pub const PRIVACY_LINGER: Duration = Duration::from_secs(30);
+/// 打开防窥的控制端都走了之后，防窥最多再开这么久。平时不到这么久就关了（[`release_privacy`]），这是兜底：
+/// 万一没人叫它，本机的显示器也不会一直黑着、键盘鼠标一直不能用
+const PRIVACY_HOLD_MAX: Duration = Duration::from_secs(90);
 /// 最后一个会话结束之后，补屏的虚拟显示器再留这么久（等断线重连）
 const SESSION_LINGER: Duration = Duration::from_secs(30);
 /// 会话开始时没有显示器：最多等虚拟显示器这么久
@@ -94,7 +96,7 @@ struct Wanted {
     sessions: HashSet<u64>,
     /// 打开了防窥的会话
     holders: HashSet<u64>,
-    /// 打开防窥的会话都结束了：这之前接着开着（等控制端重连，见模块说明）
+    /// 打开防窥的会话都结束了：接着开着，直到 [`release_privacy`]（最多到这个时刻，见模块说明）
     linger: Option<Instant>,
     /// 最后一个会话结束的时刻
     idle_since: Option<Instant>,
@@ -247,8 +249,8 @@ impl Drop for Lease {
         let mut w = HUB.wants.lock().unwrap();
         w.sessions.remove(&self.session_id);
         if w.holders.remove(&self.session_id) && w.holders.is_empty() {
-            // 打开防窥的都走了：给它重连的时间
-            w.linger = Some(now + PRIVACY_LINGER);
+            // 打开防窥的都走了：接着开着，远程控制结束了才关（先锁屏，或者给断线的重连的时间，见 host::ending）
+            w.linger = Some(now + PRIVACY_HOLD_MAX);
         }
         if w.sessions.is_empty() {
             w.idle_since = Some(now);
@@ -256,6 +258,19 @@ impl Drop for Lease {
         publish(&w);
         w.poke();
     }
+}
+
+/// 远程控制结束了（或者打开防窥的控制端走了、不会回来了，见 `host::ending`）：打开防窥的会话都不在的话，
+/// 防窥马上关掉。还有会话开着它（例如断线的控制端带着它重连上了）时什么也不做
+pub fn release_privacy() {
+    let mut w = HUB.wants.lock().unwrap();
+    if !w.holders.is_empty() || w.linger.is_none() {
+        return;
+    }
+    w.linger = None;
+    tracing::info!("privacy mode ends with the remote control");
+    publish(&w);
+    w.poke();
 }
 
 /// 进程启动时（还没有会话）、卸载时：上次意外退出没恢复的恢复掉（见模块说明）

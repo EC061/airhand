@@ -37,7 +37,8 @@ TLS to the relay ends at the relay, so sessions get a second, end-to-end layer (
 ## Privacy mode
 
 - A controller that can connect can already operate this computer with administrator (SYSTEM) rights; [privacy mode](usage.md#privacy-mode) lets it do so without the people at the computer seeing it: all local monitors go blank and the local keyboard and mouse stop working. To keep others from doing that on a computer, add `privacy_mode = false` to its `config.toml`
-- It's only turned on after the controller confirms the handshake, so a replayed handshake message can't blank the screen. It turns off by itself 30 seconds after the controllers that turned it on have all disconnected; people at the computer can end it by disconnecting it from the network or restarting it (after a restart the host first restores the monitors)
+- It's only turned on after the controller confirms the handshake, so a replayed handshake message can't blank the screen. When the remote control ends (the controller disconnects; one that dropped gets 30 seconds to reconnect) the host locks the screen first and then turns privacy mode off, so the local monitors come back showing the lock screen; people at the computer can end it by disconnecting it from the network or restarting it (after a restart the host first restores the monitors)
+- The screen is locked by default when the remote control ends (not only in privacy mode): when the controller leaves, the desktop isn't left open in front of whoever is at the computer. To turn this off, uncheck "Lock screen when remote control ends" in the tray menu (`lock_on_end` in `config.toml`)
 - Display changes are never saved to Windows' display database, and they're undone after a crash or a power cut too, so the computer won't come up with a black screen later (see [How it works](architecture.md#virtual-display-privacy-mode-keeping-the-screen-on))
 
 ## Web console

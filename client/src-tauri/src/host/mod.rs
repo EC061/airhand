@@ -7,6 +7,7 @@ mod cursor;
 #[cfg(windows)]
 pub(crate) mod desktop;
 pub mod encoder;
+pub(crate) mod ending;
 pub mod gate;
 mod input;
 #[cfg(target_os = "macos")]
@@ -32,7 +33,7 @@ use airhand_proto::signal::Reclaim;
 use gate::DesktopGate;
 use tauri::async_runtime::JoinHandle;
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{info, warn};
 
 pub use airhand_link::host::HostCmd;
 
@@ -90,6 +91,24 @@ pub(crate) async fn clip_provider(
     (!local.is_empty()).then(|| Arc::new(local) as Arc<dyn airhand_link::files::Provider>)
 }
 
+/// 托盘菜单里切换"结束远程后锁屏"（见 [`ending`]）：写进 config.toml，马上生效，托盘里跟着变。
+/// 写不进去就不改（不然重新启动之后又变回去，和菜单里看到的不一样）。要写文件：不在主线程、异步任务里调用
+pub(crate) fn set_lock_on_end(hub: &StatusHub, on: bool) {
+    match config::save_lock_on_end(on) {
+        Ok(()) => {
+            ending::set_lock_on_end(on);
+            info!(
+                on,
+                "locking the screen when the remote control ends: changed"
+            );
+        }
+        Err(e) => warn!("can't change locking the screen when the remote control ends: {e:#}"),
+    }
+    // 勾选项被点击时系统已经翻转了勾选状态：没改成也要按现在的刷新一次
+    let on = ending::lock_on_end();
+    hub.send_modify(|s| s.host.lock_on_end = Some(on));
+}
+
 /// 采集失败是不是因为缺少系统权限（这种情况由会话用 `Notice::MissingPermissions` 单独说明）。
 pub(crate) fn missing_permission(e: &anyhow::Error) -> bool {
     #[cfg(target_os = "macos")]
@@ -113,6 +132,12 @@ impl HostService {
     /// 启动被控端，状态写进 `hub` 的 [`AppStatus::host`](crate::status::AppStatus::host)。
     pub fn start(hub: StatusHub) -> Self {
         clock::init();
+        let lock_on_end = ending::lock_on_end();
+        hub.send_if_modified(|s| {
+            let changed = s.host.lock_on_end != Some(lock_on_end);
+            s.host.lock_on_end = Some(lock_on_end);
+            changed
+        });
         let gate = DesktopGate::load(hub.clone());
         let (cmd, rx) = mpsc::unbounded_channel();
         let task = tauri::async_runtime::spawn(run(hub, gate.clone(), rx));
