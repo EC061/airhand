@@ -109,6 +109,20 @@ pub(crate) fn set_lock_on_end(hub: &StatusHub, on: bool) {
     hub.send_modify(|s| s.host.lock_on_end = Some(on));
 }
 
+/// 菜单栏图标的菜单里切换"不自动睡眠"（macOS，见 [`power`]）：写进 config.toml，马上生效，菜单里跟着变。
+/// 写不进去就不改（理由同 [`set_lock_on_end`]）。要写文件：不在主线程、异步任务里调用
+pub(crate) fn set_prevent_sleep(hub: &StatusHub, on: bool) {
+    match config::save_prevent_sleep(on) {
+        Ok(()) => {
+            power::set_prevent_sleep(on);
+            info!(on, "preventing automatic sleep: changed");
+        }
+        Err(e) => warn!("can't change preventing automatic sleep: {e:#}"),
+    }
+    let on = power::prevent_sleep();
+    hub.send_modify(|s| s.host.prevent_sleep = Some(on));
+}
+
 /// 采集失败是不是因为缺少系统权限（这种情况由会话用 `Notice::MissingPermissions` 单独说明）。
 pub(crate) fn missing_permission(e: &anyhow::Error) -> bool {
     #[cfg(target_os = "macos")]
@@ -126,22 +140,33 @@ pub struct HostService {
     task: JoinHandle<()>,
     cmd: mpsc::UnboundedSender<HostCmd>,
     gate: Arc<DesktopGate>,
+    /// 被控端运行期间按"不自动睡眠"不让电脑空闲睡眠（macOS，见 [`power`]）
+    _hosting: power::Hosting,
 }
 
 impl HostService {
     /// 启动被控端，状态写进 `hub` 的 [`AppStatus::host`](crate::status::AppStatus::host)。
     pub fn start(hub: StatusHub) -> Self {
         clock::init();
-        let lock_on_end = ending::lock_on_end();
+        let lock_on_end = Some(ending::lock_on_end());
+        // 不自动睡眠只有 macOS 有（菜单里只在知道现在的设置时显示）
+        let prevent_sleep = cfg!(target_os = "macos").then(power::prevent_sleep);
         hub.send_if_modified(|s| {
-            let changed = s.host.lock_on_end != Some(lock_on_end);
-            s.host.lock_on_end = Some(lock_on_end);
+            let changed =
+                s.host.lock_on_end != lock_on_end || s.host.prevent_sleep != prevent_sleep;
+            s.host.lock_on_end = lock_on_end;
+            s.host.prevent_sleep = prevent_sleep;
             changed
         });
         let gate = DesktopGate::load(hub.clone());
         let (cmd, rx) = mpsc::unbounded_channel();
         let task = tauri::async_runtime::spawn(run(hub, gate.clone(), rx));
-        Self { task, cmd, gate }
+        Self {
+            task,
+            cmd,
+            gate,
+            _hosting: power::hosting(),
+        }
     }
 
     pub fn send(&self, c: HostCmd) {

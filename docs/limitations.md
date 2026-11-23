@@ -33,7 +33,8 @@
 
 - When recording from **Airhand Microphone** in Safari on the Mac, turn off **echo cancellation in the website’s microphone settings**. On Safari 27.2, the voice-processing audio unit fails to open this virtual input. Web apps can request the selected `deviceId` with `echoCancellation: { exact: false }` in `getUserMedia`.
 - The host needs the Screen & System Audio Recording and Accessibility permissions, which only the local user can grant in System Settings; since macOS 15 the system also asks again from time to time whether to keep allowing screen recording
-- The login window and the lock screen can't be captured or controlled
+- The login window (after a restart, before anyone logs in) can't be captured or controlled. The lock screen can: if the display is off, it's woken up when a controller connects
+- A Mac that is asleep is offline and can't be reached. **Prevent automatic sleeping** (see "Lock screen and sleep" in [Usage → Host](usage.md#host-default)) only applies while Airhand runs and the Mac is on a power adapter; it can't stop a closed lid (without an external display and power), Sleep from the Apple menu or a low battery, and Airhand can't wake a Mac that has gone to sleep remotely
 - The host doesn't offer AV1 (current Apple chips can only decode it in hardware), so AV1 shows as unavailable in the console and HEVC is used instead
 - The controller (WKWebView) can't lock the keyboard: in fullscreen, Command+Tab, Command+Space and the like are still handled locally, so use "Send shortcut" in the toolbar
 - WKWebView on older macOS versions may lack Opus decoding, in which case the console says remote audio can't be played

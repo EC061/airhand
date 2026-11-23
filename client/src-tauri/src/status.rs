@@ -84,6 +84,10 @@ pub struct HostStatus {
     /// 托盘还没连上服务里的被控端、服务里的被控端是旧版本），托盘里不显示这一项
     #[serde(default)]
     pub lock_on_end: Option<bool>,
+    /// 不自动睡眠（macOS，菜单栏图标的菜单里切换，见 `host::power`）。`None`：这个平台没有这一项（Windows、Linux）、
+    /// 被控端还没启动，菜单里不显示这一项
+    #[serde(default)]
+    pub prevent_sleep: Option<bool>,
 }
 
 impl Default for HostStatus {
@@ -96,6 +100,7 @@ impl Default for HostStatus {
             pairing_locked: false,
             paired: 0,
             lock_on_end: None,
+            prevent_sleep: None,
         }
     }
 }

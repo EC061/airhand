@@ -144,6 +144,8 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
   "std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDirectDisplay", "CGDisplayConfiguration",
   "CGDisplayStream", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGImage", "CGRemoteOperation",
+  # 屏幕锁着没有（CGSessionCopyCurrentDictionary，见 src/host/macos.rs）
+  "CGSession",
   "libc",
 ] }
 objc2-core-media = { version = "0.3", default-features = false, features = [

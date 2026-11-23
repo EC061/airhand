@@ -56,6 +56,8 @@ const PERMISSION_CHECK: Duration = Duration::from_secs(2);
 const DISPLAY_CHECK: Duration = Duration::from_secs(2);
 /// 没有虚拟麦克风（或者打不开）时隔多久再找一次，例如对方刚装好 Steam
 const MIC_CHECK: Duration = Duration::from_secs(5);
+/// macOS：会话开始时列不出显示器（睡着了）的话，叫醒它之后最多等这么久
+const WAKE_WAIT: Duration = Duration::from_secs(3);
 
 /// 显示器列表变了之后，每一路画面看的显示器在新列表里的序号：按名字找（插拔别的显示器时序号可能变），
 /// 找不到（被拔掉了）的那一路不要了；一路都不剩就改看主显示器（新列表的第一个，见 [`resolve_view`]）。
@@ -116,9 +118,9 @@ fn ticker(period: Duration) -> Interval {
     t
 }
 
-/// 等虚拟显示器出来（最多 [`virtual_display::APPEAR_WAIT`]）：列出的显示器，等不到就是空的
-async fn wait_for_displays() -> Vec<DisplayInfo> {
-    let deadline = tokio::time::Instant::now() + virtual_display::APPEAR_WAIT;
+/// 等显示器出来（虚拟显示器补上、睡着的显示器亮起来），最多 `wait`：列出的显示器，等不到就是空的
+async fn wait_for_displays(wait: Duration) -> Vec<DisplayInfo> {
+    let deadline = tokio::time::Instant::now() + wait;
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(300)).await;
         let now = tokio::task::spawn_blocking(capture::displays)
@@ -493,7 +495,14 @@ impl Platform for Desktop {
                 session_id = self.session_id,
                 "no displays, waiting for the virtual display"
             );
-            displays = wait_for_displays().await;
+            displays = wait_for_displays(virtual_display::APPEAR_WAIT).await;
+        } else if displays.is_empty() && cfg!(target_os = "macos") && !start.privacy {
+            // macOS：睡着的显示器可能列不出来（锁屏之后常见），上面刚叫醒它：等它亮起来，同样不先说"没有显示器"
+            info!(
+                session_id = self.session_id,
+                "no displays, waiting for the display to wake up"
+            );
+            displays = wait_for_displays(WAKE_WAIT).await;
         }
         self.displays = displays;
         let view = resolve_view(&start.view, self.displays.len(), MAX_STREAMS);

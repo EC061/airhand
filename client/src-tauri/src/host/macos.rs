@@ -1,4 +1,4 @@
-//! macOS 被控端的公共部分：系统权限、显示器枚举、CoreMedia 时间换算、线程优先级。
+//! macOS 被控端的公共部分：系统权限、显示器枚举、锁屏状态、CoreMedia 时间换算、线程优先级。
 //!
 //! macOS 上采集屏幕 / 系统声音需要"屏幕与系统录音"权限，注入键鼠需要"辅助功能"权限，
 //! 都只能由本机用户在"系统设置 → 隐私与安全性"里授予。被控端启动时会请求一次（系统弹出对话框），
@@ -10,10 +10,11 @@ use std::time::Instant;
 
 use airhand_proto::session::DisplayInfo;
 use anyhow::{Result, anyhow};
-use objc2_core_foundation::{CFBoolean, CFDictionary, CFString};
+use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayIsMain,
     CGDisplayMirrorsDisplay, CGDisplayMode, CGError, CGGetActiveDisplayList,
+    CGSessionCopyCurrentDictionary,
 };
 use objc2_core_media::{CMClock, CMTime, CMTimeFlags};
 
@@ -241,6 +242,29 @@ pub fn display_infos() -> Vec<DisplayInfo> {
         .collect()
 }
 
+// ───────────────────────────── 锁屏 ─────────────────────────────
+
+/// 当前图形会话的信息里"屏幕锁着"的那一项。没有公开文档，但一直这样用：锁着时是 true，没锁时通常根本没有这一项
+const SCREEN_IS_LOCKED: &str = "CGSSessionScreenIsLocked";
+
+/// 屏幕锁着没有（锁屏界面、屏幕保护要了密码）。不在图形会话里（例如 SSH 里运行）时是 `None`。
+/// 采集线程据此在锁屏、解锁时重新打开采集（见 `capture::sck`）
+pub fn screen_locked() -> Option<bool> {
+    let session = CGSessionCopyCurrentDictionary()?;
+    // 键都是字符串，值是各种 CF 类型
+    let session: CFRetained<CFDictionary<CFString, CFType>> =
+        unsafe { CFRetained::cast_unchecked(session) };
+    Some(is_locked(&session))
+}
+
+/// 会话信息里说屏幕锁着（没有这一项、不是布尔值都算没锁）
+fn is_locked(session: &CFDictionary<CFString, CFType>) -> bool {
+    session
+        .get(&CFString::from_static_str(SCREEN_IS_LOCKED))
+        .and_then(|v| v.downcast_ref::<CFBoolean>().map(CFBoolean::as_bool))
+        .unwrap_or(false)
+}
+
 // ───────────────────────────── 时间 ─────────────────────────────
 
 /// CoreMedia 时间戳（ScreenCaptureKit 的画面帧和声音包都用主机时钟）对应的时刻。
@@ -275,6 +299,23 @@ mod tests {
             assert_eq!(display(0).unwrap(), *first);
         }
         assert!(display(200).is_err());
+    }
+
+    /// 会话信息里的锁屏标记：没有这一项、不是布尔值都算没锁
+    #[test]
+    fn lock_flag() {
+        let key = CFString::from_static_str(SCREEN_IS_LOCKED);
+        let other = CFString::from_static_str("kCGSessionOnConsoleKey");
+        let yes: &CFType = CFBoolean::new(true);
+        let no: &CFType = CFBoolean::new(false);
+        let text = CFString::from_static_str("1");
+        let dict = |k: &CFString, v: &CFType| CFDictionary::from_slices(&[k], &[v]);
+        assert!(is_locked(&dict(&key, yes)));
+        assert!(!is_locked(&dict(&key, no)));
+        assert!(!is_locked(&dict(&other, yes)));
+        assert!(!is_locked(&dict(&key, &text)));
+        // 跑测试的电脑一般没锁着；没有图形会话时是 None
+        println!("screen locked: {:?}", screen_locked());
     }
 
     /// "缺少权限"包在别的错误说明里也要认得出来（采集线程据此不把它当作采集失败）

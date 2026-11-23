@@ -119,6 +119,20 @@ impl Hosting {
         }
     }
 
+    /// 菜单里切换"不自动睡眠"（macOS，见 `host::power`）。`hub`：本进程里的被控端用的状态（就是托盘的）
+    fn set_prevent_sleep(&self, hub: &StatusHub, on: bool) {
+        match self {
+            Hosting::InProcess(_) => {
+                let hub = hub.clone();
+                // 要写配置文件，不在主线程上做
+                std::thread::spawn(move || host::set_prevent_sleep(&hub, on));
+            }
+            // 服务里的被控端没有这一项（`HostStatus::prevent_sleep` 是 `None`，菜单里不显示）
+            #[cfg(windows)]
+            Hosting::Service(_) => {}
+        }
+    }
+
     fn pairing(&self, cmd: PairingCmd) {
         match self {
             Hosting::InProcess(h) => {
@@ -374,6 +388,15 @@ pub(crate) fn on_menu(app: &AppHandle, id: &str) {
                 h.set_lock_on_end(&state.hub, !current);
             }
             // 勾选项被点击时系统会自动翻转勾选状态：先按原来的设置重建菜单，改好了（被控端确认后）再刷新
+            state.hub.send_modify(|_| {});
+        }
+        "prevent_sleep" => {
+            let state = app.state::<AppState>();
+            let current = state.hub.borrow().host.prevent_sleep;
+            if let (Some(current), Some(h)) = (current, &state.services.lock().unwrap().host) {
+                h.set_prevent_sleep(&state.hub, !current);
+            }
+            // 同上：先按原来的设置重建菜单，改好了再刷新
             state.hub.send_modify(|_| {});
         }
         "new_pairing" | "forget_paired" => {
