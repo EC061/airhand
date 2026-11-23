@@ -19,18 +19,26 @@
 //!
 //! ## macOS
 //!
-//! 有会话时要两个电源断言（IOKit 的 `IOPMAssertionCreateWithName`）：`PreventUserIdleDisplaySleep`（不因为没人碰
-//! 键盘鼠标而熄屏；设置了"显示器关闭后要求密码"时也就不会因此锁屏）和 `PreventUserIdleSystemSleep`。
+//! 有会话时要三个电源断言（IOKit 的 `IOPMAssertionCreateWithName`）：`PreventUserIdleDisplaySleep`（不因为没人碰
+//! 键盘鼠标而熄屏；设置了"显示器关闭后要求密码"时也就不会因此锁屏）、`PreventUserIdleSystemSleep`，以及
+//! `PreventSystemSleep`（头文件说它过时了，但 WindowServer、`caffeinate -s` 都还在用）：接着外接电源时合上笔记本的
+//! 盖子也不睡眠，远程控制接着进行（用电池时系统不认它，照常睡眠）。它要在合盖之前就要着：合上的那一刻系统就开始
+//! 睡眠了，等补屏的虚拟显示器出来再要来不及。
 //! 叫醒显示器用 `IOPMAssertionDeclareUserActivity`（和 `caffeinate -u` 一样，当作本机有人碰了一下）：会话开始时，
 //! 以及采集线程发现显示器睡着了的时候（锁屏之后常见，见 `capture::sck`）。亮着的锁屏界面照常采集、照常接收
-//! 注入的键鼠，控制端可以输入密码解锁。
+//! 注入的键鼠，控制端可以输入密码解锁。合着笔记本的盖子、除了内建的显示器又没有别的显示器时不叫：叫醒的只是
+//! 盖子后面的屏幕，系统给它 10 秒（WindowServer 的 `DMGrace`）就又关掉，画面跟着断一次，每 10 秒循环一回；
+//! 合盖之后由虚拟显示器顶上（见 `virtual_display`）。
+//!
+//! **有虚拟显示器期间**（[`keep_running`]）：也要着 `PreventSystemSleep`，最后一个会话结束后等重连的那一会儿
+//! 合着盖子也不睡眠。
 //!
 //! **不自动睡眠**（托盘菜单，默认关，`config.toml` 的 `prevent_sleep`）：电脑睡眠时进程被冻结，和服务器的连接断开，
 //! 控制端只能看到它离线。打开后被控端运行期间（不只是有会话时，见 [`Hosting`]）一直要着 `PreventUserIdleSystemSleep`：
 //! 电脑不因为空闲而睡眠，一直在线等着被连接；显示器照常熄灭（连上来时叫醒它）。只在接着外接电源时要
 //! （每 [`POWER_CHECK`] 看一次电源，接上、拔掉电源时跟着变），用电池时照常睡眠。
 //!
-//! 管不了的：合上笔记本的盖子（没接外接显示器和电源时）、苹果菜单里选"睡眠"、电量低，断言都挡不住。
+//! 管不了的：没有会话时合上笔记本的盖子（没接外接显示器和电源时）、苹果菜单里选"睡眠"、电量低，断言都挡不住。
 //! 这些都不需要什么权限，`pmset -g assertions` 里能看到它们（名字以 Airhand 开头）。
 
 use std::sync::LazyLock;
@@ -144,6 +152,8 @@ mod imp {
     const NO_IDLE_DISPLAY_SLEEP: &str = "PreventUserIdleDisplaySleep";
     /// `kIOPMAssertPreventUserIdleSystemSleep`
     const NO_IDLE_SLEEP: &str = "PreventUserIdleSystemSleep";
+    /// `kIOPMAssertionTypePreventSystemSleep`：接着外接电源时合上盖子也不睡眠（见模块说明）
+    const NO_SLEEP: &str = "PreventSystemSleep";
     /// `IOPSGetProvidingPowerSourceType` 说用的是外接电源（`kIOPMACPowerKey`）
     const AC_POWER: &str = "AC Power";
     /// 叫醒显示器最多这么频繁（采集线程打开失败时每 250 ms 重试一次）
@@ -195,7 +205,9 @@ mod imp {
         if st.0 > 1 {
             return;
         }
-        st.1 = [NO_IDLE_DISPLAY_SLEEP, NO_IDLE_SLEEP]
+        // PreventSystemSleep：接着电源时合上盖子也不睡眠（见模块说明）。合上盖子的那一刻系统就开始睡了，
+        // 等虚拟显示器补上之后再要来不及
+        st.1 = [NO_IDLE_DISPLAY_SLEEP, NO_IDLE_SLEEP, NO_SLEEP]
             .into_iter()
             .filter_map(|k| create(k, "Airhand: a remote session is active"))
             .collect();
@@ -218,6 +230,10 @@ mod imp {
     static WOKEN: Mutex<(Option<Instant>, AssertionId)> = Mutex::new((None, 0));
 
     pub fn wake_display() {
+        if lid_hides_everything() {
+            debug!("the lid is closed and there's no other display: not waking the built-in one");
+            return;
+        }
         let mut st = WOKEN.lock().unwrap();
         if st.0.is_some_and(|t| t.elapsed() < WAKE_EVERY) {
             return;
@@ -229,6 +245,35 @@ mod imp {
             debug!("declared user activity to wake the display");
         } else {
             warn!("can't wake the display: IOReturn {r:#x}");
+        }
+    }
+
+    /// 合着盖子，接着的显示器只有内建的（或者一个都没有）：叫醒了也只是在盖子后面亮一会儿（见模块说明）
+    fn lid_hides_everything() -> bool {
+        use objc2_core_graphics::CGDisplayIsBuiltin;
+        crate::host::macos::lid_closed()
+            && crate::host::macos::online_display_ids()
+                .into_iter()
+                .all(|id| CGDisplayIsBuiltin(id))
+    }
+
+    /// 有虚拟显示器期间不睡眠（见 [`super::keep_running`]）。丢掉时放开
+    pub struct Running(Option<AssertionId>);
+
+    pub fn keep_running() -> Running {
+        let id = create(NO_SLEEP, "Airhand: a virtual display is in use");
+        if id.is_some() {
+            info!("preventing sleep while the virtual display is in use");
+        }
+        Running(id)
+    }
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            if let Some(id) = self.0.take() {
+                release(id);
+                info!("the computer may sleep when the lid is closed again");
+            }
         }
     }
 
@@ -357,7 +402,23 @@ impl Drop for Awake {
     }
 }
 
-/// 屏幕熄了的话叫醒它（见模块说明）。macOS 上两次之间至少隔 2 秒，多叫的什么也不做
+/// 有虚拟显示器期间（macOS，见 `virtual_display`）：接着外接电源时合上盖子也不睡眠（见模块说明）。丢掉时放开
+#[cfg(target_os = "macos")]
+pub use imp::Running;
+
+#[cfg(target_os = "macos")]
+pub fn keep_running() -> Running {
+    imp::keep_running()
+}
+
+/// 现在用的是不是外接电源（macOS；台式机总是，读不出来时也当作是）
+#[cfg(target_os = "macos")]
+pub fn on_ac() -> bool {
+    imp::on_ac()
+}
+
+/// 屏幕熄了的话叫醒它（见模块说明）。macOS 上两次之间至少隔 2 秒，多叫的什么也不做；合着盖子、
+/// 没有别的显示器时也不叫
 pub fn wake_display() {
     #[cfg(any(windows, target_os = "macos"))]
     imp::wake_display();
@@ -397,14 +458,14 @@ impl Drop for Hosting {
 mod tests {
     use super::*;
 
-    /// 会话期间的两个断言：第一个会话开始时要，最后一个结束时放开
+    /// 会话期间的三个断言：第一个会话开始时要，最后一个结束时放开
     #[test]
     fn session_assertions_follow_sessions() {
         let a = keep_awake();
         let b = keep_awake();
-        assert_eq!(imp::session_assertions(), 2);
+        assert_eq!(imp::session_assertions(), 3);
         drop(a);
-        assert_eq!(imp::session_assertions(), 2, "还有一个会话");
+        assert_eq!(imp::session_assertions(), 3, "还有一个会话");
         drop(b);
         assert_eq!(imp::session_assertions(), 0);
     }
@@ -457,6 +518,7 @@ mod tests {
             |kind: &str, name: &str| held.iter().any(|l| l.contains(kind) && l.contains(name));
         assert!(has("PreventUserIdleDisplaySleep", "remote session"));
         assert!(has("PreventUserIdleSystemSleep", "remote session"));
+        assert!(has("PreventSystemSleep", "remote session"));
         assert!(has(
             "PreventUserIdleSystemSleep",
             "Prevent automatic sleeping"

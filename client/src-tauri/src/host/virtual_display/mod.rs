@@ -1,4 +1,5 @@
-//! 虚拟显示器（Windows）：被控端的显示器关了电源也能远程控制；防窥模式。
+//! 虚拟显示器（Windows）：被控端的显示器关了电源也能远程控制；防窥模式。macOS 上只有补屏（合上盖子、
+//! 没接显示器时，见 [`mac`]）。
 //!
 //! # 显示器关了电源
 //!
@@ -26,7 +27,8 @@
 //!
 //! 用的是 MttVDD（Virtual Display Driver），随安装包带着，为所有用户安装时问用户要不要装（见 [`device`]）。
 //! 没装、或者 Airhand 不是为所有用户安装的（没有权限启用、停用设备）时都用不了：补屏不做，防窥是
-//! [`PrivacyState::Unavailable`]。macOS、Linux 没有这些（不发防窥的状态，控制端不显示这个开关）。
+//! [`PrivacyState::Unavailable`]。macOS 用系统自带的（私有的）`CGVirtualDisplay`，不用装什么，只补屏；
+//! macOS、Linux 都没有防窥（不发防窥的状态，控制端不显示这个开关）。
 //!
 //! 别的地方用的是 [`join`] 得到的 [`Lease`]：每个会话一个，会话结束时丢掉。
 
@@ -34,6 +36,8 @@
 mod block;
 #[cfg(windows)]
 pub(crate) mod device;
+#[cfg(target_os = "macos")]
+mod mac;
 #[cfg(windows)]
 mod manager;
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -182,7 +186,9 @@ pub struct Lease {
 pub fn join(session_id: u64) -> Lease {
     #[cfg(windows)]
     let usable = device::usable();
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    let usable = mac::usable();
+    #[cfg(not(any(windows, target_os = "macos")))]
     let usable = false;
     let mut w = HUB.wants.lock().unwrap();
     w.sessions.insert(session_id);
@@ -194,6 +200,12 @@ pub fn join(session_id: u64) -> Lease {
         w.stopping = false;
         manager::spawn();
     }
+    #[cfg(target_os = "macos")]
+    if usable && !w.running {
+        w.running = true;
+        w.stopping = false;
+        mac::spawn();
+    }
     publish(&w);
     w.poke();
     Lease { session_id }
@@ -203,7 +215,8 @@ impl Lease {
     /// 控制端打开 / 关闭防窥模式。不能用、不允许时什么也不做（状态里已经说了为什么）
     pub fn set_privacy(&self, on: bool) {
         let mut w = HUB.wants.lock().unwrap();
-        if !w.usable || !allowed() || !w.sessions.contains(&self.session_id) {
+        // 只有 Windows 有防窥（macOS 的虚拟显示器只用来补屏）
+        if !cfg!(windows) || !w.usable || !allowed() || !w.sessions.contains(&self.session_id) {
             return;
         }
         w.failed = None;
@@ -273,6 +286,12 @@ pub fn release_privacy() {
     w.poke();
 }
 
+/// 本进程补屏的虚拟显示器的像素大小（macOS，见 [`mac`]）；`id` 不是它时为 `None`
+#[cfg(target_os = "macos")]
+pub fn pixels(id: u32) -> Option<(u32, u32)> {
+    mac::pixels(id)
+}
+
 /// 进程启动时（还没有会话）、卸载时：上次意外退出没恢复的恢复掉（见模块说明）
 pub fn recover() {
     #[cfg(windows)]
@@ -281,7 +300,7 @@ pub fn recover() {
     }
 }
 
-/// 进程退出：恢复原样（停用虚拟显示器、放回本机的显示器、放开键盘鼠标），最多等几秒
+/// 进程退出：恢复原样（停用虚拟显示器、放回本机的显示器、放开键盘鼠标；macOS 撤掉补屏的虚拟显示器），最多等几秒
 pub fn shutdown() {
     let mut w = HUB.wants.lock().unwrap();
     if !w.running {
