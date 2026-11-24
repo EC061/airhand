@@ -64,6 +64,7 @@ const HAS_PRIVACY: bool = cfg!(any(windows, target_os = "macos"));
 /// 万一没人叫它，本机的显示器也不会一直黑着、键盘鼠标一直不能用
 const PRIVACY_HOLD_MAX: Duration = Duration::from_secs(90);
 /// 最后一个会话结束之后，补屏的虚拟显示器再留这么久（等断线重连）
+#[cfg(any(windows, target_os = "macos"))]
 const SESSION_LINGER: Duration = Duration::from_secs(30);
 /// 会话开始时没有显示器：最多等虚拟显示器这么久
 pub const APPEAR_WAIT: Duration = Duration::from_secs(15);
@@ -137,6 +138,7 @@ impl Wanted {
         !self.holders.is_empty() || self.linger.is_some_and(|t| now < t)
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
     fn sessions(&self, now: Instant) -> bool {
         !self.sessions.is_empty() || self.idle_since.is_some_and(|t| now < t + SESSION_LINGER)
     }
