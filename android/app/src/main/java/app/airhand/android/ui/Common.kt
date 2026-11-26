@@ -62,6 +62,7 @@ import app.airhand.android.core.OsKind
 import app.airhand.android.core.ServerState
 import app.airhand.android.ui.theme.Brand
 import app.airhand.android.ui.theme.Mono
+import kotlin.math.roundToInt
 
 /** 应用标志：渐变圆角方块 + 光标 */
 @Composable
@@ -126,6 +127,9 @@ fun ServerPill(state: ServerState, onClick: (() -> Unit)? = null) {
         }
     }
 }
+
+/** 百分比滑块的值：按 [step] 取整，限制在 [min]..[max] */
+fun snapPercent(raw: Float, min: Int, max: Int, step: Int): Int = ((raw / step).roundToInt() * step).coerceIn(min, max)
 
 @Composable
 fun SectionTitle(text: String, modifier: Modifier = Modifier) {

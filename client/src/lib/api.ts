@@ -284,6 +284,10 @@ export type SessionEvent =
       fps: number;
       kbps: number;
       rttMs: number | null;
+      /** 往返时延前后两次相差多少（平滑过），还没量过两次时为 null */
+      jitterMs: number | null;
+      /** 最近收到的画面里受丢包影响的占百分之几（等重传卡住过的，或者收到了却解不了、跳过的） */
+      stallPct: number;
       width: number;
       height: number;
       frames: number;
