@@ -246,6 +246,59 @@ enum class PrivacyState(val wire: String) {
     }
 }
 
+/** 扩展虚拟显示器（无线副屏）规格，与 Rust 的 `airhand_proto::session::VirtualDisplaySpec` 对应 */
+data class VirtualDisplaySpec(
+    val width: Int,
+    val height: Int,
+    val hz: Int = 60,
+    val hidpi: Boolean = false,
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("width", width)
+        .put("height", height)
+        .put("hz", hz)
+        .put("hidpi", hidpi)
+
+    fun swapped(): VirtualDisplaySpec = copy(width = height, height = width)
+
+    companion object {
+        /** 按本机屏幕宽高生成同比例的虚拟显示器规格（偶数像素，长边上限 2560 以兼顾清晰度与编解码性能） */
+        fun matchScreen(screenW: Int, screenH: Int, hz: Int = 60, hidpi: Boolean = false): VirtualDisplaySpec {
+            var w = screenW.coerceAtLeast(480).toDouble()
+            var h = screenH.coerceAtLeast(480).toDouble()
+            val maxSide = 2560.0
+            val longSide = maxOf(w, h)
+            if (longSide > maxSide) {
+                val scale = maxSide / longSide
+                w *= scale
+                h *= scale
+            }
+            val evenW = (w.toInt().coerceIn(480, 3840) and 1.inv()).coerceAtLeast(480)
+            val evenH = (h.toInt().coerceIn(480, 3840) and 1.inv()).coerceAtLeast(480)
+            return VirtualDisplaySpec(evenW, evenH, hz.coerceIn(30, 120), hidpi)
+        }
+    }
+}
+
+/**
+ * 被控端的扩展虚拟显示器（无线副屏）状态，与 Rust 的 `airhand_proto::session::ExtendState` 对应。
+ */
+enum class ExtendState(val wire: String) {
+    UNAVAILABLE("unavailable"),
+    NOT_ALLOWED("notAllowed"),
+    OFF("off"),
+    STARTING("starting"),
+    ON("on"),
+    FAILED("failed");
+
+    val active get() = this == ON || this == STARTING
+    val usable get() = this != UNAVAILABLE && this != NOT_ALLOWED
+
+    companion object {
+        fun fromWire(s: String?): ExtendState = entries.firstOrNull { it.wire == s } ?: UNAVAILABLE
+    }
+}
+
 object Code {
     /** 用户输入的控制码 → 6 位数字（允许空格 / 短横线），不合法返回 null。规则与 `airhand_proto::parse_code` 相同 */
     fun parse(input: String): String? {

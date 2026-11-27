@@ -110,6 +110,9 @@ pub struct Settings {
     /// 见 `host::virtual_display`）。
     /// 模板里没有它：要禁止时手动写上 `privacy_mode = false`
     pub privacy_mode: bool,
+    /// 允许控制端创建扩展虚拟显示器（无线副屏，`extend_display`，默认允许）。
+    /// 模板里没有它：要禁止时手动写上 `extend_display = false`
+    pub extend_display: bool,
     /// 远程控制结束后锁屏（`lock_on_end`，被控端，见 `host::ending`）。模板里没有它：在托盘菜单里切换时写入
     /// （[`save_lock_on_end`]，马上生效，不用重新启动）
     pub lock_on_end: bool,
@@ -132,6 +135,7 @@ impl Default for Settings {
             autostart: true,
             language: None,
             privacy_mode: true,
+            extend_display: true,
             lock_on_end: true,
             prevent_sleep: false,
             pause_awdl: false,
@@ -244,6 +248,9 @@ fn parse(text: &str) -> Result<Settings> {
     }
     if let Some(v) = doc.get("privacy_mode").and_then(|v| v.as_bool()) {
         s.privacy_mode = v;
+    }
+    if let Some(v) = doc.get("extend_display").and_then(|v| v.as_bool()) {
+        s.extend_display = v;
     }
     if let Some(v) = doc.get("lock_on_end").and_then(|v| v.as_bool()) {
         s.lock_on_end = v;

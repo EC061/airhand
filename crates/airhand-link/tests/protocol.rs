@@ -12,7 +12,7 @@ use airhand_link::controller::{Command, ConnectOptions};
 use airhand_proto::media::{self, AudioHeader, CursorSlot, CursorState, VideoHeader};
 use airhand_proto::session::{
     Codec, CursorShape, CursorVisibility, InputEvent, MouseButton, QualitySettings, StreamView,
-    SystemAction, TouchPhase,
+    SystemAction, TouchPhase, VirtualDisplaySpec,
 };
 use serde_json::{Value, json};
 
@@ -129,6 +129,19 @@ fn commands() -> Vec<(Value, Command)> {
             json!({ "cmd": "privacy", "sid": 3, "on": true }),
             Command::Privacy { sid: 3, on: true },
         ),
+        // 扩展虚拟显示器（无线副屏）
+        (
+            json!({ "cmd": "extend", "sid": 3, "spec": { "width": 1920, "height": 1200, "hz": 60, "hidpi": false } }),
+            Command::Extend {
+                sid: 3,
+                spec: Some(VirtualDisplaySpec {
+                    width: 1920,
+                    height: 1200,
+                    hz: 60,
+                    hidpi: false,
+                }),
+            },
+        ),
         (
             json!({ "cmd": "clipboard", "sid": 3, "text": "hi" }),
             Command::Clipboard {
@@ -172,7 +185,9 @@ fn connect_options() -> (Value, ConnectOptions) {
             "settings": { "fps": 60, "bitrateKbps": 8000, "maxShort": 1080, "adaptive": true, "codec": "h265" },
             "audio": true,
             // 重连时接着保持防窥模式（四种界面都带）
-            "privacy": true
+            "privacy": true,
+            // 重连时接着保持扩展虚拟显示器（四种界面都带）
+            "extend": { "width": 1920, "height": 1200, "hz": 60, "hidpi": false }
         }),
         ConnectOptions {
             resume: Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
@@ -182,6 +197,12 @@ fn connect_options() -> (Value, ConnectOptions) {
             audio: true,
             view: Vec::new(),
             privacy: true,
+            extend: Some(VirtualDisplaySpec {
+                width: 1920,
+                height: 1200,
+                hz: 60,
+                hidpi: false,
+            }),
         },
     )
 }

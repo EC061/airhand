@@ -81,6 +81,7 @@ fn initiate(code: u32) -> (Initiator, Vec<u8>) {
         false,
         Vec::new(),
         false,
+        None,
     );
     secure::initiate(InitiatorParams {
         code,

@@ -73,9 +73,10 @@ impl Place {
             | HostMsg::Clipboard { .. }
             | HostMsg::Bye(_)
             | HostMsg::Direct(_)
-            // 麦克风、防窥模式的状态很少变，跟在 Hello 后面按顺序发
+            // 麦克风、防窥模式、扩展虚拟显示器的状态很少变，跟在 Hello 后面按顺序发
             | HostMsg::Mic { .. }
             | HostMsg::Privacy { .. }
+            | HostMsg::Extend { .. }
             | HostMsg::Files(_) => queued(None),
         }
     }

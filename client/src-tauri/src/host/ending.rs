@@ -241,7 +241,10 @@ pub fn local_input() {
 fn run(action: Action) {
     match action {
         Action::Nothing => {}
-        Action::Release => virtual_display::release_privacy(),
+        Action::Release => {
+            virtual_display::release_privacy();
+            virtual_display::release_extend();
+        }
         Action::Wait(epoch) => spawn(move || {
             std::thread::sleep(RECONNECT);
             let action = state().expire(epoch);
@@ -251,6 +254,7 @@ fn run(action: Action) {
             info!("the remote control ended");
             lock();
             virtual_display::release_privacy();
+            virtual_display::release_extend();
         }),
     }
 }

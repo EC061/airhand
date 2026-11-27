@@ -104,7 +104,7 @@ async fn open_session(
     req_id: u32,
 ) -> Established {
     let me = Identity::generate();
-    let intro = secure::controller_intro("e2e", "test", settings, audio, Vec::new(), false);
+    let intro = secure::controller_intro("e2e", "test", settings, audio, Vec::new(), false, None);
     let (initiator, init) = secure::initiate(InitiatorParams {
         code,
         me: &me,
@@ -434,6 +434,11 @@ async fn e2e_roundtrip() {
             }
             // 防窥模式（装了虚拟显示器驱动的 Windows、有辅助功能权限的 macOS 被控端能开）：这个测试不开
             HostMsg::Privacy { state, detail } => println!("防窥模式: {state:?} {detail:?}"),
+            HostMsg::Extend {
+                state,
+                display,
+                detail,
+            } => println!("扩展副屏: {state:?} {display:?} {detail:?}"),
             HostMsg::Notice(notice) => {
                 println!("提示: {notice:?}");
                 match notice.expect("同一个版本的提示都认识") {

@@ -17,8 +17,8 @@ use crate::secure::Sealer;
 use crate::transport::write_lane;
 use airhand_proto::media::{self, VideoHeader};
 use airhand_proto::session::{
-    ByeReason, Codec, ControllerDatagram, ControllerMsg, DirectOffer, DisplayInfo, HostMsg,
-    MicState, Notice, Platform, PrivacyState, REPORT_EVERY, SystemAction, VideoReport,
+    ByeReason, Codec, ControllerDatagram, ControllerMsg, DirectOffer, DisplayInfo, ExtendState,
+    HostMsg, MicState, Notice, Platform, PrivacyState, REPORT_EVERY, SystemAction, VideoReport,
 };
 use airhand_proto::{MAX_STREAMS, datagram};
 use anyhow::Result;
@@ -302,6 +302,13 @@ pub enum SessionEvent {
     /// 被控端不支持时不会有。`detail`：没能打开时给排查问题用的技术信息（英文）
     Privacy {
         state: PrivacyState,
+        detail: Option<String>,
+    },
+    /// 被控端的扩展虚拟显示器（无线副屏）：会话开始时一次，之后有变化再来。
+    /// 被控端不支持（手机）时不会有。`display`：开启后它在显示器列表里的名字；`detail`：失败原因（英文）
+    Extend {
+        state: ExtendState,
+        display: Option<String>,
         detail: Option<String>,
     },
     /// `retry=false` 表示对方主动断开，不应自动重连
@@ -798,6 +805,22 @@ pub(super) async fn run(
                         PrivacyState::Unavailable
                     };
                     let _ = out.event(SessionEvent::Privacy { state, detail });
+                }
+                HostMsg::Extend {
+                    state,
+                    display,
+                    detail,
+                } => {
+                    let state = if state.is_known() {
+                        state
+                    } else {
+                        ExtendState::Unavailable
+                    };
+                    let _ = out.event(SessionEvent::Extend {
+                        state,
+                        display,
+                        detail,
+                    });
                 }
             }
         }

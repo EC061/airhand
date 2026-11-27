@@ -207,15 +207,12 @@ impl Drop for Curtain {
     }
 }
 
-/// 要调黑、要盖上的显示器：接着的（睡着的、镜像的也算），补屏的虚拟显示器 `ours` 除外
-fn targets(
-    online: &[CGDirectDisplayID],
-    ours: Option<CGDirectDisplayID>,
-) -> Vec<CGDirectDisplayID> {
+/// 要调黑、要盖上的显示器：接着的（睡着的、镜像的也算），本进程的虚拟显示器 `ours` 除外
+fn targets(online: &[CGDirectDisplayID], ours: &[CGDirectDisplayID]) -> Vec<CGDirectDisplayID> {
     online
         .iter()
         .copied()
-        .filter(|&id| Some(id) != ours)
+        .filter(|id| !ours.contains(id))
         .collect()
 }
 
@@ -252,7 +249,8 @@ fn blank_screens(stop: &AtomicBool, ready: &AtomicBool) {
     let mut gamma = Gamma::default();
     while !stop.load(Ordering::Acquire) {
         let now = Instant::now();
-        let ids = targets(&macos::online_display_ids(), super::mac::current());
+        let ours = super::mac::current();
+        let ids = targets(&macos::online_display_ids(), &ours);
         let now_layout: Vec<_> = ids.iter().map(|&id| (id, CGDisplayBounds(id))).collect();
         let changed = now_layout != layout;
         gamma.blacken(&ids, changed, now);
@@ -618,9 +616,9 @@ mod tests {
     /// 补屏的虚拟显示器不调黑、不盖
     #[test]
     fn our_virtual_display_is_left_alone() {
-        assert_eq!(targets(&[1, 2, 3], Some(2)), [1, 3]);
-        assert_eq!(targets(&[1, 2], None), [1, 2]);
-        assert!(targets(&[2], Some(2)).is_empty());
+        assert_eq!(targets(&[1, 2, 3], &[2]), [1, 3]);
+        assert_eq!(targets(&[1, 2], &[]), [1, 2]);
+        assert!(targets(&[2], &[2]).is_empty());
     }
 
     /// 真的调黑本机的主显示器 1 秒：读回来是黑的，恢复之后不再是黑的（本机屏幕会黑 1 秒，测试进程崩溃了系统也会

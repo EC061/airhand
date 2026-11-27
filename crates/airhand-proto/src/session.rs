@@ -229,6 +229,90 @@ pub enum HostMsg {
         #[n(1)]
         detail: Option<String>,
     },
+    /// 扩展虚拟显示器（无线副屏）现在怎么样。Hello 之后发一次，之后有变化再发；不支持的被控端（手机）不发。
+    /// `display`：开启后该虚拟显示器在 [`HostMsg::Displays::displays`] 里的名字（便于控制端识别）
+    /// `detail`：失败时给排查问题用的技术信息（英文）
+    #[n(15)]
+    Extend {
+        #[n(0)]
+        state: ExtendState,
+        #[n(1)]
+        display: Option<String>,
+        #[n(2)]
+        detail: Option<String>,
+    },
+}
+
+/// 扩展虚拟显示器的默认刷新率（Hz）
+pub const DEFAULT_VIRTUAL_DISPLAY_HZ: u8 = 60;
+
+fn default_virtual_display_hz() -> u8 {
+    DEFAULT_VIRTUAL_DISPLAY_HZ
+}
+
+/// 请求创建的扩展虚拟显示器规格（宽、高、刷新率、是否 HiDPI）。
+/// 横屏、竖屏都支持，范围校验并对齐到偶数（[`VirtualDisplaySpec::sanitized`]）。JSON 是 camelCase
+#[derive(Encode, Decode, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualDisplaySpec {
+    /// 像素宽度（480..=3840，偶数）
+    #[n(0)]
+    pub width: u16,
+    /// 像素高度（480..=3840，偶数）
+    #[n(1)]
+    pub height: u16,
+    /// 刷新率（30..=120 Hz，默认 60）
+    #[n(2)]
+    #[serde(default = "default_virtual_display_hz")]
+    pub hz: u8,
+    /// HiDPI 模式（macOS：逻辑点数为像素的一半，更清晰；Windows / Linux 忽略）。false 时不写进线上的数组
+    #[cbor(n(3), skip_if = "is_false")]
+    #[serde(default)]
+    pub hidpi: bool,
+}
+
+impl Default for VirtualDisplaySpec {
+    fn default() -> Self {
+        Self {
+            width: 1920,
+            height: 1080,
+            hz: DEFAULT_VIRTUAL_DISPLAY_HZ,
+            hidpi: false,
+        }
+    }
+}
+
+impl VirtualDisplaySpec {
+    pub const MIN_SIDE: u16 = 480;
+    pub const MAX_SIDE: u16 = 3840;
+    pub const MIN_HZ: u8 = 30;
+    pub const MAX_HZ: u8 = 120;
+
+    /// 范围校验并对齐到偶数
+    pub fn sanitized(mut self) -> Self {
+        self.width = self.width.clamp(Self::MIN_SIDE, Self::MAX_SIDE) & !1;
+        self.height = self.height.clamp(Self::MIN_SIDE, Self::MAX_SIDE) & !1;
+        self.hz = self.hz.clamp(Self::MIN_HZ, Self::MAX_HZ);
+        self
+    }
+}
+
+open_enum! {
+    /// 被控端的扩展虚拟显示器（无线副屏）状态。不认识的值（对方版本新增的）控制端当作不可用
+    pub enum ExtendState {
+        /// 这台被控端还不能建扩展虚拟显示器（Windows 未装虚拟显示器驱动 / 非所有用户安装；Linux 没有可用的虚拟输出）
+        Unavailable = 0 => "unavailable",
+        /// 被控端的设置不允许
+        NotAllowed = 1 => "notAllowed",
+        /// 能建，现在关着
+        Off = 2 => "off",
+        /// 正在创建或调整虚拟显示器
+        Starting = 3 => "starting",
+        /// 已开启：扩展虚拟显示器在桌面上
+        On = 4 => "on",
+        /// 刚才没能打开或调整，detail 给出原因
+        Failed = 5 => "failed",
+    }
 }
 
 open_enum! {
@@ -304,7 +388,8 @@ impl HostMsg {
             | HostMsg::Bye(_)
             | HostMsg::Direct(_)
             | HostMsg::Mic { .. }
-            | HostMsg::Privacy { .. } => SessionLane::Control,
+            | HostMsg::Privacy { .. }
+            | HostMsg::Extend { .. } => SessionLane::Control,
         }
     }
 }
@@ -679,6 +764,12 @@ pub enum ControllerMsg {
         #[n(0)]
         on: bool,
     },
+    /// 开启 / 调整 / 关闭扩展虚拟显示器（`Some(spec)` 开启或改分辨率比例，`None` 关闭）。被控端不支持时什么也不做
+    #[n(14)]
+    Extend {
+        #[n(0)]
+        spec: Option<VirtualDisplaySpec>,
+    },
 }
 
 impl ControllerMsg {
@@ -695,7 +786,8 @@ impl ControllerMsg {
             | Self::Audio { .. }
             | Self::Direct(_)
             | Self::Mic { .. }
-            | Self::Privacy { .. } => SessionLane::Control,
+            | Self::Privacy { .. }
+            | Self::Extend { .. } => SessionLane::Control,
         }
     }
 }
@@ -1192,6 +1284,46 @@ mod tests {
         assert_eq!(on.lane(), SessionLane::Control);
         let back: ControllerMsg = minicbor::decode(&minicbor::to_vec(&on).unwrap()).unwrap();
         assert!(matches!(back, ControllerMsg::Privacy { on: true }));
+
+        // 扩展虚拟显示器：新版本加的状态留着原值（控制端当作不可用），规格范围校验并对齐偶数
+        let extend = HostMsg::Extend {
+            state: ExtendState::Unknown(11),
+            display: Some("DP-1".into()),
+            detail: Some("x".into()),
+        };
+        let back: HostMsg = minicbor::decode(&minicbor::to_vec(&extend).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            HostMsg::Extend {
+                state: ExtendState::Unknown(11),
+                display: Some(ref n),
+                detail: Some(ref d),
+            } if n == "DP-1" && d == "x"
+        ));
+        assert_eq!(back.lane(), SessionLane::Control);
+        let spec = VirtualDisplaySpec {
+            width: 1921,
+            height: 1201,
+            hz: 200,
+            hidpi: true,
+        }
+        .sanitized();
+        assert_eq!(
+            spec,
+            VirtualDisplaySpec {
+                width: 1920,
+                height: 1200,
+                hz: 120,
+                hidpi: true,
+            }
+        );
+        let ext_on = ControllerMsg::Extend { spec: Some(spec) };
+        assert_eq!(ext_on.lane(), SessionLane::Control);
+        let back: ControllerMsg = minicbor::decode(&minicbor::to_vec(&ext_on).unwrap()).unwrap();
+        assert!(matches!(back, ControllerMsg::Extend { spec: Some(s) } if s == spec));
+        let ext_off = ControllerMsg::Extend { spec: None };
+        let back: ControllerMsg = minicbor::decode(&minicbor::to_vec(&ext_off).unwrap()).unwrap();
+        assert!(matches!(back, ControllerMsg::Extend { spec: None }));
 
         // 按钮不认识的输入事件：解得出来，被控端不执行
         let e = InputEvent::MouseButton {

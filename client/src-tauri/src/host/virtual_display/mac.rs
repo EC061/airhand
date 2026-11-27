@@ -65,6 +65,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use airhand_proto::session::VirtualDisplaySpec;
 use anyhow::{Context, Result, bail};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayIsBuiltin,
@@ -104,6 +105,8 @@ const PRODUCT: u32 = 0x7664;
 /// 测试建的用另一个序列号：同一个身份只能有一块（本机的 Airhand 正预备着时会被拒绝），也不动
 /// macOS 给真的那块记着的排列
 const SERIAL: u32 = if cfg!(test) { 0x7e57 } else { 1 };
+/// 扩展虚拟显示器（无线副屏）用独立的序列号，可以与补屏虚拟显示器共存且记住各自的排列
+const EXTEND_SERIAL: u32 = if cfg!(test) { 0x7e58 } else { 2 };
 /// 看、换虚拟显示器的模式的子进程最多等这么久（实测 0.4 秒左右）
 const HELPER_WAIT: Duration = Duration::from_secs(5);
 /// 子进程的命令行参数（见 [`cli`]）
@@ -155,8 +158,8 @@ pub(super) fn usable() -> bool {
     unsafe { ah_vd_supported() != 0 }
 }
 
-/// 现在的虚拟显示器：编号、像素大小
-static CURRENT: Mutex<Option<(CGDirectDisplayID, u32, u32)>> = Mutex::new(None);
+/// 本进程建的虚拟显示器列表（补屏 + 扩展）：编号、像素大小
+static CURRENT: Mutex<Vec<(CGDirectDisplayID, u32, u32)>> = Mutex::new(Vec::new());
 
 /// 最近看到的本机主显示器的样子（见模块说明）：管理线程退出了也记着，合着盖子时再启动也照着它建
 static SEEN: Mutex<Option<Shape>> = Mutex::new(None);
@@ -170,9 +173,9 @@ pub(super) fn mode_generation() -> u64 {
     MODE_GEN.load(Ordering::Relaxed)
 }
 
-/// 本进程现在的虚拟显示器（防窥时不调黑、不盖它，见 [`super::curtain`]）
-pub(super) fn current() -> Option<CGDirectDisplayID> {
-    CURRENT.lock().unwrap().map(|c| c.0)
+/// 本进程现在的虚拟显示器编号列表（防窥时不调黑、不盖它们，见 [`super::curtain`]）
+pub(super) fn current() -> Vec<CGDirectDisplayID> {
+    CURRENT.lock().unwrap().iter().map(|c| c.0).collect()
 }
 
 /// 本进程建的虚拟显示器的像素大小（见模块说明）；不是它时为 `None`
@@ -180,20 +183,21 @@ pub fn pixels(id: CGDirectDisplayID) -> Option<(u32, u32)> {
     CURRENT
         .lock()
         .unwrap()
-        .filter(|c| c.0 == id)
+        .iter()
+        .find(|c| c.0 == id)
         .map(|c| (c.1, c.2))
 }
 
 /// 虚拟显示器 `id` 现在的像素大小是 `(w, h)`（子进程看到的，见 [`follow_mode`]）；变了的话返回 `true`
 fn set_pixels(id: CGDirectDisplayID, (w, h): (u32, u32)) -> bool {
-    let mut c = CURRENT.lock().unwrap();
-    match c.as_mut() {
-        Some(c) if c.0 == id && (c.1, c.2) != (w, h) => {
-            (c.1, c.2) = (w, h);
-            true
-        }
-        _ => false,
+    let mut list = CURRENT.lock().unwrap();
+    if let Some(c) = list.iter_mut().find(|c| c.0 == id)
+        && (c.1, c.2) != (w, h)
+    {
+        (c.1, c.2) = (w, h);
+        return true;
     }
+    false
 }
 
 /// 一个显示模式：多大（点），帧缓冲多大（像素）。HiDPI 的像素是点数的两倍，1x 的一样大
@@ -271,6 +275,26 @@ impl Shape {
             pixels: self.pixels(),
         }
     }
+
+    /// 按控制端请求的扩展虚拟显示器规格生成样子：开启 HiDPI 时点数减半、像素与请求严格一致（`sanitized` 已保证宽高为偶数）
+    fn for_extend(spec: VirtualDisplaySpec) -> Self {
+        let spec = spec.sanitized();
+        let (width, height) = if spec.hidpi {
+            (
+                (spec.width as u32 / 2).max(240),
+                (spec.height as u32 / 2).max(240),
+            )
+        } else {
+            (spec.width as u32, spec.height as u32)
+        };
+        let per_mm = 110.0 / 25.4;
+        Self {
+            width,
+            height,
+            hidpi: spec.hidpi,
+            mm: (width as f64 / per_mm, height as f64 / per_mm),
+        }
+    }
 }
 
 /// 本机的显示器 `id` 现在的样子。直接读它的显示模式：熄着屏（睡着）的也读得到，[`macos::displays`] 只列亮着的。
@@ -321,6 +345,10 @@ unsafe impl Send for VirtualDisplay {}
 
 impl VirtualDisplay {
     fn create(shape: Shape) -> Result<Self> {
+        Self::create_with(shape, SERIAL, c"Airhand")
+    }
+
+    fn create_with(shape: Shape, serial: u32, name: &CStr) -> Result<Self> {
         let mut id = 0;
         let mut error = [0 as c_char; 256];
         let handle = unsafe {
@@ -333,8 +361,8 @@ impl VirtualDisplay {
                 shape.mm.1,
                 VENDOR,
                 PRODUCT,
-                SERIAL,
-                c"Airhand".as_ptr(),
+                serial,
+                name.as_ptr(),
                 &mut id,
                 error.as_mut_ptr(),
                 error.len(),
@@ -345,7 +373,7 @@ impl VirtualDisplay {
             bail!("can't create the virtual display: {msg}");
         };
         let (pw, ph) = shape.pixels();
-        *CURRENT.lock().unwrap() = Some((id, pw, ph));
+        CURRENT.lock().unwrap().push((id, pw, ph));
         Ok(Self { handle, id, shape })
     }
 }
@@ -353,12 +381,7 @@ impl VirtualDisplay {
 impl Drop for VirtualDisplay {
     fn drop(&mut self) {
         // 先不认它了，显示器列表里它的大小就照系统说的（它马上就没了）
-        {
-            let mut c = CURRENT.lock().unwrap();
-            if c.is_some_and(|c| c.0 == self.id) {
-                *c = None;
-            }
-        }
+        CURRENT.lock().unwrap().retain(|c| c.0 != self.id);
         unsafe { ah_vd_destroy(self.handle.as_ptr()) };
     }
 }
@@ -612,16 +635,16 @@ fn bump() {
     HUB.displays.send_modify(|g| *g = g.wrapping_add(1));
 }
 
-/// 接着的显示器里能用的（不算虚拟显示器 `ours`；合着盖子时不算内建的）
+/// 接着的显示器里能用的（不算本进程的虚拟显示器 `ours`；合着盖子时不算内建的）
 fn usable_displays(
     online: &[CGDirectDisplayID],
-    ours: Option<CGDirectDisplayID>,
+    ours: &[CGDirectDisplayID],
     lid: bool,
 ) -> Vec<CGDirectDisplayID> {
     online
         .iter()
         .copied()
-        .filter(|&id| Some(id) != ours && !(lid && CGDisplayIsBuiltin(id)))
+        .filter(|id| !ours.contains(id) && !(lid && CGDisplayIsBuiltin(*id)))
         .collect()
 }
 
@@ -659,6 +682,7 @@ fn run() {
     let can_create = usable();
     let mut curtain: Option<(Curtain, Instant)> = None;
     let mut filling: Option<Filling> = None;
+    let mut extended: Option<(VirtualDisplaySpec, VirtualDisplay, power::Running)> = None;
     // 本机能用的显示器从什么时候起一直在
     let mut usable_since: Option<Instant> = None;
     let mut retry_at: Option<Instant> = None;
@@ -669,9 +693,10 @@ fn run() {
     let mut unmirrored_since: Option<Instant> = None;
     // 虚拟显示器自己在的时候查它的模式（见 `ModeWatch`）；不是自己在的时候为 `None`
     let mut mode_watch: Option<ModeWatch> = None;
+    let mut extend_mode_watch: Option<ModeWatch> = None;
     loop {
         let now = Instant::now();
-        let (sessions, ready, stopping, privacy) = {
+        let (sessions, ready, stopping, privacy, extend_want) = {
             let mut w = HUB.wants.lock().unwrap();
             // "辅助功能"权限可能在会话中途给了、收回了
             let can = curtain::usable();
@@ -680,10 +705,16 @@ fn run() {
                 super::publish(&w);
             }
             let privacy = w.privacy(now) && !w.stopping;
-            (w.sessions(now), w.ready, w.stopping, privacy)
+            let extend_want = if w.stopping || !can_create {
+                None
+            } else {
+                w.extend_wanted(now)
+            };
+            (w.sessions(now), w.ready, w.stopping, privacy, extend_want)
         };
         follow_privacy(&mut curtain, privacy, now);
-        let ours = filling.as_ref().map(|f| f.display.id);
+        let fill_id = filling.as_ref().map(|f| f.display.id);
+        let ext_id = extended.as_ref().map(|(_, vd, _)| vd.id);
         let lid_state = macos::lid_state();
         let lid = lid_state == Some(true);
         // 合上、打开盖子：系统把主显示器换成了虚拟显示器、又换回来了，会话马上重新列出显示器
@@ -697,22 +728,93 @@ fn run() {
         }
         let online = macos::online_display_ids();
         // 系统把它撤掉了（例如 WindowServer 重启）：重新建
-        if let Some(id) = ours
+        if let Some(id) = fill_id
             && !online.contains(&id)
         {
             warn!(id, "the virtual display went away");
             filling = None;
             bump();
         }
-        let ours = filling.as_ref().map(|f| f.display.id);
-        let usable = usable_displays(&online, ours, lid);
+        if let Some(id) = ext_id
+            && !online.contains(&id)
+        {
+            warn!(id, "the extended virtual display went away");
+            extended = None;
+            extend_mode_watch = None;
+            let mut w = HUB.wants.lock().unwrap();
+            w.extend_active = None;
+            super::publish(&w);
+            bump();
+        }
+        // 管理扩展虚拟显示器（独立的非镜像副屏）
+        match (&extended, extend_want) {
+            (Some((cur_spec, vd, _)), Some(want)) if *cur_spec == want => {
+                if CGDisplayMirrorsDisplay(vd.id) != 0 {
+                    mirror(vd.id, 0);
+                    bump();
+                }
+            }
+            (_, Some(want)) => {
+                extended = None;
+                extend_mode_watch = None;
+                let shape = Shape::for_extend(want);
+                match VirtualDisplay::create_with(shape, EXTEND_SERIAL, c"Airhand Extended") {
+                    Ok(vd) => {
+                        if CGDisplayMirrorsDisplay(vd.id) != 0 {
+                            mirror(vd.id, 0);
+                        }
+                        let (pw, ph) = shape.pixels();
+                        let display_name = if CGDisplayIsMain(vd.id) {
+                            "Main".into()
+                        } else {
+                            format!("Display {}", vd.id)
+                        };
+                        info!(
+                            id = vd.id,
+                            display = %display_name,
+                            w = pw,
+                            h = ph,
+                            hidpi = shape.hidpi,
+                            "extended virtual display created"
+                        );
+                        extended = Some((want, vd, power::keep_running()));
+                        let mut w = HUB.wants.lock().unwrap();
+                        w.extend_active = Some((want, display_name));
+                        w.extend_failed = None;
+                        super::publish(&w);
+                        bump();
+                    }
+                    Err(e) => {
+                        super::fail_extend(crate::host::capture::wire_detail(&e));
+                    }
+                }
+            }
+            (Some(_), None) => {
+                info!("removing the extended virtual display");
+                extended = None;
+                extend_mode_watch = None;
+                let mut w = HUB.wants.lock().unwrap();
+                w.extend_active = None;
+                super::publish(&w);
+                bump();
+            }
+            (None, None) => {}
+        }
+        let mut ours: Vec<CGDirectDisplayID> = Vec::with_capacity(2);
+        if let Some(f) = &filling {
+            ours.push(f.display.id);
+        }
+        if let Some((_, vd, _)) = &extended {
+            ours.push(vd.id);
+        }
+        let usable = usable_displays(&online, &ours, lid);
         let builtin = online
             .iter()
             .copied()
-            .find(|&id| Some(id) != ours && CGDisplayIsBuiltin(id));
+            .find(|id| !ours.contains(id) && CGDisplayIsBuiltin(*id));
         let external = online
             .iter()
-            .any(|&id| Some(id) != ours && !CGDisplayIsBuiltin(id));
+            .any(|id| !ours.contains(id) && !CGDisplayIsBuiltin(*id));
         // 预备（见模块说明）：开着盖子的笔记本、接着电源、没接别的显示器
         let standby = match builtin {
             Some(b) if lid_state == Some(false) && ac.0 && !external => Some(b),
@@ -826,15 +928,35 @@ fn run() {
                 }
             }
         }
-        if filling.is_none() && curtain.is_none() {
+        match &extended {
+            None => extend_mode_watch = None,
+            Some((_, vd, _)) if CGDisplayMirrorsDisplay(vd.id) == 0 => {
+                if extend_mode_watch.as_ref().is_none_or(|w| w.id != vd.id) {
+                    extend_mode_watch = Some(ModeWatch::new(vd.id, now));
+                }
+                if let Some(w) = extend_mode_watch.as_mut()
+                    && w.due(now)
+                {
+                    follow_mode(vd, w);
+                }
+            }
+            _ => {}
+        }
+        if filling.is_none() && extended.is_none() && curtain.is_none() {
             // 没事可做了：退出（下一个会话加入、打开"不自动睡眠"时再启动）。台式机上预备不用管。
             // 在锁里看，免得和 join、set_ready、打开防窥错过
             let mut w = HUB.wants.lock().unwrap();
             let laptop = lid_state.is_some() && can_create;
             let now = Instant::now();
-            if w.stopping || (!w.sessions(now) && !w.privacy(now) && !(w.ready && laptop)) {
+            if w.stopping
+                || (!w.sessions(now)
+                    && !w.privacy(now)
+                    && w.extend_wanted(now).is_none()
+                    && !(w.ready && laptop))
+            {
                 w.running = false;
                 w.on = false;
+                w.extend_active = None;
                 super::publish(&w);
                 HUB.wake.notify_all();
                 break;
@@ -843,16 +965,18 @@ fn run() {
         let starting = curtain.as_ref().is_some_and(|(c, _)| !c.ready());
         let period = if starting {
             STARTING
-        } else if sessions || curtain.is_some() {
+        } else if sessions || curtain.is_some() || extended.is_some() {
             WATCH
         } else {
             WATCH_READY
         };
         // 到了该查模式的时候就醒，不多等一轮（没有会话时一轮是 2 秒）
-        let mode_due = mode_watch
-            .as_ref()
-            .and_then(|w| w.next)
-            .map(|t| t.saturating_duration_since(Instant::now()));
+        let mode_due = [mode_watch.as_ref(), extend_mode_watch.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|w| w.next)
+            .map(|t| t.saturating_duration_since(Instant::now()))
+            .min();
         wait(mode_due.map_or(period, |d| d.min(period)));
     }
     info!("virtual display manager stopped");
@@ -1061,11 +1185,11 @@ mod tests {
             .copied()
             .filter(|&id| CGDisplayIsBuiltin(id))
             .collect();
-        assert_eq!(usable_displays(&online, None, false), online);
-        let closed = usable_displays(&online, None, true);
+        assert_eq!(usable_displays(&online, &[], false), online);
+        let closed = usable_displays(&online, &[], true);
         assert!(closed.iter().all(|id| !builtin.contains(id)));
         if let Some(&first) = online.first() {
-            assert!(!usable_displays(&online, Some(first), false).contains(&first));
+            assert!(!usable_displays(&online, &[first], false).contains(&first));
         }
     }
 

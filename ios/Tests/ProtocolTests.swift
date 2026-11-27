@@ -98,6 +98,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertTrue(same(Commands.mic(3, true), find("mic")))
         XCTAssertTrue(same(Commands.clipboard(3, "hi"), find("clipboard")))
         XCTAssertTrue(same(Commands.privacy(3, true), find("privacy")))
+        XCTAssertTrue(same(Commands.extend(3, VirtualDisplaySpec(width: 1920, height: 1200, hz: 60, hidpi: false)), find("extend")))
     }
 
     /// 会话事件 `privacy` 的状态（Rust 的 `PrivacyState`，camelCase）；不认识的当作开不了
@@ -110,6 +111,15 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(PrivacyState.allCases.filter(\.usable), [.off, .starting, .on, .failed])
     }
 
+    func testExtendStates() {
+        XCTAssertEqual(ExtendState.allCases.map(\.rawValue), ["unavailable", "notAllowed", "off", "starting", "on", "failed"])
+        XCTAssertEqual(ExtendState.fromWire("notAllowed"), .notAllowed)
+        XCTAssertEqual(ExtendState.fromWire("somethingNew"), .unavailable)
+        XCTAssertEqual(ExtendState.fromWire(nil), .unavailable)
+        XCTAssertEqual(ExtendState.allCases.filter(\.active), [.starting, .on])
+        XCTAssertEqual(ExtendState.allCases.filter(\.usable), [.off, .starting, .on, .failed])
+    }
+
     func testConnectOptions() {
         let o = Self.fixture.obj("connectOptions")!
         let s = o.obj("settings")!
@@ -117,8 +127,11 @@ final class ProtocolTests: XCTestCase {
                         codec: Codec.fromWire(s.str("codec"))!)
         let resume = Resume.fromJson(o.arr("resume"))
         XCTAssertNotNil(resume)
+        let ext = o.obj("extend").map {
+            VirtualDisplaySpec(width: $0.int("width")!, height: $0.int("height")!, hz: $0.int("hz")!, hidpi: $0.bool("hidpi"))
+        }
         var c = Commands.connect(code: "123456", resume: resume, settings: q, hostKey: o.str("hostKey"), pairing: o.str("pairing"), audio: o.bool("audio"),
-                                 privacy: o.bool("privacy"))
+                                 privacy: o.bool("privacy"), extend: ext)
         XCTAssertTrue(o.bool("privacy"))
         c["cmd"] = nil
         c["code"] = nil

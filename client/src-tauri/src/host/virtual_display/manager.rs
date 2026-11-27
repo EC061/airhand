@@ -6,11 +6,12 @@
 
 use std::time::{Duration, Instant};
 
+use airhand_proto::session::VirtualDisplaySpec;
 use tracing::{info, warn};
 
 use super::block::Blocker;
 use super::plan::{Plan, Step, Wants};
-use super::{HUB, Mode, device, fail, topology};
+use super::{HUB, Mode, device, fail, fail_extend, topology};
 use crate::host::desktop;
 
 /// 有事的时候多久看一次（启用之后等它出来、改完设置之后看结果）
@@ -47,24 +48,44 @@ fn run() {
     let mut blocker: Option<Blocker> = None;
     let mut enabled_at: Option<Instant> = None;
     let mut failures = 0u32;
+    let mut extend_failures = 0u32;
     // 连着几次查不到显示设置了
     let mut look_failures = 0u32;
-    // 最近看到的本机主显示器的分辨率：虚拟显示器用一样的
+    // 最近看到的本机主显示器的分辨率：补屏/防窥的虚拟显示器用一样的
     let mut mode = Mode::default();
-    // 这次启用之后已经把虚拟显示器换成了 `mode`
+    // 上一次准备应用的模式（分辨扩展屏改分辨率时要不要重新应用）
+    let mut applied_mode: Option<Mode> = None;
+    // 针对某个扩展规格已经重启过一次驱动写 vdd_settings.xml：防死循环
+    let mut bounced_spec: Option<VirtualDisplaySpec> = None;
+    // 这次启用之后已经把虚拟显示器换成了目标模式
     let mut mode_set = false;
     loop {
         let now = Instant::now();
-        let (wants, stopping) = {
+        let (wants, extend_want, stopping) = {
             let w = HUB.wants.lock().unwrap();
+            let extend_want = if w.stopping {
+                None
+            } else {
+                w.extend_wanted(now)
+            };
             let wants = Wants {
                 privacy: w.privacy(now),
+                extend: extend_want.is_some(),
                 sessions: w.sessions(now),
             };
-            (wants, w.stopping)
+            (wants, extend_want, w.stopping)
         };
         // 要退出了：什么都不要了，恢复原样
         let wants = if stopping { Wants::default() } else { wants };
+        let extend_want = if stopping || wants.privacy {
+            None
+        } else {
+            extend_want
+        };
+        if extend_want.is_none() {
+            extend_failures = 0;
+            bounced_spec = None;
+        }
         if wants.privacy && blocker.is_none() {
             blocker = Some(Blocker::start());
         } else if !wants.privacy {
@@ -102,6 +123,17 @@ fn run() {
         {
             mode = m;
         }
+        let target_mode = match extend_want {
+            Some(spec) => Mode {
+                width: spec.width as u32,
+                height: spec.height as u32,
+                hz: spec.hz as u32,
+            },
+            None => mode,
+        };
+        if applied_mode != Some(target_mode) {
+            mode_set = false;
+        }
         let step = plan.step(wants, &facts, now);
         let mut busy = true;
         match step {
@@ -109,12 +141,40 @@ fn run() {
                 busy = false;
                 failures = 0;
                 if facts.virtual_active && !mode_set {
-                    match topology::apply_mode(mode) {
-                        Ok(true) => mode_set = true,
+                    match topology::apply_mode(target_mode) {
+                        Ok(true) => {
+                            mode_set = true;
+                            applied_mode = Some(target_mode);
+                            bump();
+                        }
                         Ok(false) => {}
                         Err(e) => {
-                            info!("{e:#}");
-                            mode_set = true;
+                            if let Some(spec) = extend_want
+                                && bounced_spec != Some(spec)
+                            {
+                                // MttVDD 驱动只在启动时读取 vdd_settings.xml：改分辨率不在列表里时重写配置并重启设备一次
+                                info!(?target_mode, "reloading virtual display driver for requested resolution: {e:#}");
+                                bounced_spec = Some(spec);
+                                if let Err(we) = device::write_settings(target_mode) {
+                                    warn!("{we:#}");
+                                }
+                                match device::set_enabled(false) {
+                                    Ok(()) => {
+                                        enabled_at = None;
+                                        busy = true;
+                                        bump();
+                                    }
+                                    Err(de) => {
+                                        warn!("{de:#}");
+                                        mode_set = true;
+                                        applied_mode = Some(target_mode);
+                                    }
+                                }
+                            } else {
+                                info!("{e:#}");
+                                mode_set = true;
+                                applied_mode = Some(target_mode);
+                            }
                         }
                     }
                 }
@@ -122,25 +182,32 @@ fn run() {
             Step::Wait => {
                 // 不是这里启用的（进程启动之前就启用着）：从现在算起
                 let since = *enabled_at.get_or_insert(now);
-                if wants.privacy && now.duration_since(since) > APPEAR {
-                    fail("the virtual display didn't show up".into());
+                if now.duration_since(since) > APPEAR {
+                    if wants.privacy {
+                        fail("the virtual display didn't show up".into());
+                    } else if wants.extend {
+                        fail_extend("the virtual display didn't show up".into());
+                    }
                 }
             }
             Step::Enable => {
-                info!(?mode, "enabling the virtual display");
-                if let Err(e) = device::write_settings(mode) {
+                info!(mode = ?target_mode, "enabling the virtual display");
+                if let Err(e) = device::write_settings(target_mode) {
                     warn!("{e:#}");
                 }
                 match device::set_enabled(true) {
                     Ok(()) => {
                         enabled_at = Some(now);
                         mode_set = false;
+                        applied_mode = None;
                         bump();
                     }
                     Err(e) => {
                         warn!("{e:#}");
                         if wants.privacy {
                             fail(crate::host::capture::wire_detail(&e));
+                        } else if wants.extend {
+                            fail_extend(crate::host::capture::wire_detail(&e));
                         }
                     }
                 }
@@ -150,6 +217,8 @@ fn run() {
                 match device::set_enabled(false) {
                     Ok(()) => {
                         enabled_at = None;
+                        mode_set = false;
+                        applied_mode = None;
                         bump();
                     }
                     Err(e) => {
@@ -160,6 +229,24 @@ fn run() {
             }
             // 停用刚失败过：等着再试（要退出了也等：不然虚拟显示器就留在桌面上了）
             Step::Backoff => {}
+            Step::Extend => {
+                info!("attaching the virtual display as an extended monitor");
+                extend_failures += 1;
+                match topology::extend() {
+                    Ok(()) => {
+                        extend_failures = 0;
+                        mode_set = false;
+                        applied_mode = None;
+                        bump();
+                    }
+                    Err(e) => {
+                        warn!("{e:#}");
+                        if extend_failures >= MAX_FAILURES {
+                            fail_extend(crate::host::capture::wire_detail(&e));
+                        }
+                    }
+                }
+            }
             Step::Isolate => {
                 info!("privacy mode: only the virtual display stays on the desktop");
                 // 先记下来：改到一半进程没了，下次启动按它恢复
@@ -170,6 +257,7 @@ fn run() {
                 if r.is_ok() {
                     plan.isolated = true;
                     mode_set = false;
+                    applied_mode = None;
                     bump();
                 }
                 if let Err(e) = &r {
@@ -195,6 +283,7 @@ fn run() {
                 match topology::isolate() {
                     Ok(()) => {
                         mode_set = false;
+                        applied_mode = None;
                         bump();
                     }
                     Err(e) => warn!("{e:#}"),
@@ -211,7 +300,16 @@ fn run() {
                 bump();
             }
         }
-        // 只留着虚拟显示器、本机的显示器都撤下了，才算开着
+        // 只留着虚拟显示器、本机的显示器都撤下了，才算开着防窥；扩展虚拟显示器在桌面上且分辨率已应用，才算就绪
+        let extend_ready_name = if extend_want.is_some()
+            && step == Step::Idle
+            && facts.virtual_active
+            && mode_set
+        {
+            topology::virtual_name()
+        } else {
+            None
+        };
         {
             let mut w = HUB.wants.lock().unwrap();
             let on = plan.isolated && step == Step::Idle && w.privacy(now);
@@ -221,6 +319,22 @@ fn run() {
                     info!("privacy mode is on");
                 }
             }
+            let next_extend = match (extend_want, extend_ready_name) {
+                (Some(spec), Some(name)) => Some((spec, name)),
+                _ => None,
+            };
+            if w.extend_active != next_extend {
+                if let Some((spec, name)) = &next_extend {
+                    info!(
+                        display = %name,
+                        w = spec.width,
+                        h = spec.height,
+                        hz = spec.hz,
+                        "extended virtual display is on"
+                    );
+                }
+                w.extend_active = next_extend;
+            }
             super::publish(&w);
             if stopping && step == Step::Idle {
                 break;
@@ -228,7 +342,7 @@ fn run() {
         }
         let period = if busy {
             BUSY
-        } else if wants.privacy || wants.sessions || facts.enabled {
+        } else if wants.privacy || wants.extend || wants.sessions || facts.enabled {
             WATCH
         } else {
             IDLE
@@ -239,6 +353,7 @@ fn run() {
     let mut w = HUB.wants.lock().unwrap();
     w.running = false;
     w.on = false;
+    w.extend_active = None;
     w.usable = device::usable();
     super::publish(&w);
     HUB.wake.notify_all();

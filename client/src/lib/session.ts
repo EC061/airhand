@@ -35,6 +35,8 @@ import {
   type MicState,
   type Platform,
   type PrivacyState,
+  type ExtendState,
+  type VirtualDisplaySpec,
   type StreamView,
   type SystemAction,
   type FileEntry,
@@ -165,6 +167,16 @@ export class RemoteSession {
   privacyDetail: string | null = null;
   /** 要防窥模式（开关）：重连时在连接选项里带上，对方就一直保持防窥。跟着对方说的状态变 */
   privacyWanted = false;
+  /** 对方的扩展虚拟显示器（无线副屏）状态；对方不支持、还没说时为 null */
+  extendState: ExtendState | null = null;
+  /** 扩展虚拟显示器对应的显示器名 */
+  extendDisplay: string | null = null;
+  /** 扩展虚拟显示器失败原因（英文技术信息） */
+  extendDetail: string | null = null;
+  /** 当前选中的扩展副屏规格 */
+  extendSpec: VirtualDisplaySpec = { width: 1920, height: 1200, hz: 60, hidpi: false };
+  /** 期望开启的扩展副屏规格：重连时带上 */
+  extendWanted: VirtualDisplaySpec | null = null;
   /** 对方复制的文件（网页版：等用户点下载，见 files.ts）；没有时为 null */
   remoteFiles: { clip: number; items: FileEntry[] } | null = null;
   /** 正在把对方复制的文件取下来：已经取了多少、一共多少（字节） */
@@ -399,9 +411,12 @@ export class RemoteSession {
     this.micState = null;
     this.micDetail = null;
     this.micOn = false;
-    // 防窥模式也一样：对方重新说。要不要在握手里就告诉它（下面的连接选项）
+    // 防窥模式、扩展副屏也一样：对方重新说。要不要在握手里就告诉它（下面的连接选项）
     this.privacyState = null;
     this.privacyDetail = null;
+    this.extendState = null;
+    this.extendDisplay = null;
+    this.extendDetail = null;
     this.attemptAt = performance.now();
     let info;
     // 开始时的画质、要不要声音、看哪几个显示器在端到端握手里就告诉对方：它一开始就按这个建编码器，
@@ -422,6 +437,7 @@ export class RemoteSession {
           audio,
           view,
           privacy: this.privacyWanted,
+          ...(this.extendWanted ? { extend: this.extendWanted } : {}),
         },
         this.view,
         onEvent,
@@ -662,6 +678,13 @@ export class RemoteSession {
         this.privacyDetail = ev.detail;
         // 开关跟着对方说的变：别的控制端打开 / 关掉了、没能打开，都以对方的为准
         this.privacyWanted = ev.state === "on" || ev.state === "starting";
+        break;
+      case "extend":
+        this.extendState = ev.state;
+        this.extendDisplay = ev.display;
+        this.extendDetail = ev.detail;
+        // 与防窥模式一致，跟着对方说的变：开启 / 启动中记着当前规格供断线重连携带
+        this.extendWanted = ev.state === "on" || ev.state === "starting" ? this.extendSpec : null;
         break;
       case "clipboardFiles":
         this.remoteFiles = { clip: ev.clip, items: ev.items };
@@ -1214,6 +1237,29 @@ export class RemoteSession {
       this.command({ cmd: "privacy", sid: this.sid, on });
       this.privacyState = on ? "starting" : "off";
       this.privacyDetail = null;
+    }
+    this.emit();
+  }
+
+  /** 更新当前选中的扩展副屏规格（开启中则立即发给对方切换分辨率，未开启时仅更新界面选择） */
+  setExtendSpec(spec: VirtualDisplaySpec) {
+    this.extendSpec = spec;
+    if (this.extendState === "on" || this.extendState === "starting") {
+      this.setExtend(spec);
+    } else {
+      this.emit();
+    }
+  }
+
+  /** 开启 / 调整 / 关闭对方的扩展虚拟显示器（无线副屏）；spec 为 null 时关闭 */
+  setExtend(spec: VirtualDisplaySpec | null) {
+    if (spec) this.extendSpec = spec;
+    this.extendWanted = spec;
+    if (this.sid !== null && this.extendState !== null && this.extendState !== "unavailable" && this.extendState !== "notAllowed") {
+      this.command({ cmd: "extend", sid: this.sid, spec });
+      this.extendState = spec ? "starting" : "off";
+      if (!spec) this.extendDisplay = null;
+      this.extendDetail = null;
     }
     this.emit();
   }

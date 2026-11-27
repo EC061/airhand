@@ -271,6 +271,19 @@ const en: Record<MsgKey, Msg> = {
   "privacy.startingMac": "Turning on",
   "privacy.unavailableMac": "Not available on the remote Mac: someone at that Mac has to allow Airhand in System Settings → Privacy & Security → Accessibility first (it's needed to block its keyboard and mouse)",
 
+  // Extended virtual display (wireless second monitor)
+  "extend.toggle": "Extended virtual display",
+  "extend.off": "Adds a virtual second monitor on the remote computer while keeping its physical display on. Automatically removed when you disconnect",
+  "extend.starting": "Creating virtual second monitor…",
+  "extend.on": "Active on {display} ({w}×{h})",
+  "extend.failed": "Couldn't start extended display ({detail})",
+  "extend.unavailableWindows": "Not available on the remote computer: Airhand needs to be installed for all users with the virtual display driver",
+  "extend.unavailableMac": "Not available on this Mac",
+  "extend.unavailableLinux": "Not available on the remote Linux computer: no free X11 RandR output/CRTC was found",
+  "extend.notAllowed": "The remote computer's settings don't allow extended virtual displays (extend_display in config.toml)",
+  "extend.resolution": "Aspect ratio & resolution",
+  "extend.swapOrientation": "Rotate 90°",
+
   "combo.winStart": "Start menu (Win)",
   "combo.altTab": "Switch windows (Alt + Tab)",
   "combo.winD": "Show desktop (Win + D)",

@@ -144,6 +144,7 @@ mod tests {
             false,
             Vec::new(),
             false,
+            None,
         );
         let (a, b) = tokio::io::duplex(65536);
         let (mut ar, mut aw) = tokio::io::split(a);

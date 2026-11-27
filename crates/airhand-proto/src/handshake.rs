@@ -224,8 +224,12 @@ pub struct ControllerIntro {
     pub view: Vec<crate::session::StreamView>,
     /// 开始时要不要防窥模式（之后的变化是 `ControllerMsg::Privacy`，见 `crate::session` 的"防窥模式"）：
     /// 重连时带上，被控端就不会在重连的间隙里把本机屏幕露出来。false 时不写进线上的数组
-    #[cbor(n(6), skip_if = "crate::session::is_false")]
+    #[cbor(n(6), with = "crate::cbor::opt_bool", has_nil)]
     pub privacy: bool,
+    /// 开始时要不要扩展虚拟显示器（无线副屏，之后的变化是 `ControllerMsg::Extend`）：
+    /// 重连时带上，被控端保持虚拟显示器不撤掉。None 时不写进线上的数组
+    #[n(7)]
+    pub extend: Option<crate::session::VirtualDisplaySpec>,
 }
 
 /// 被控端的决定（加密，见 [`HandshakeReply::verdict`]）。

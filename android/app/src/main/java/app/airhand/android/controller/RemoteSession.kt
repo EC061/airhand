@@ -11,6 +11,7 @@ import app.airhand.android.core.Codec
 import app.airhand.android.core.DecoderStats
 import app.airhand.android.core.DisplayInfo
 import app.airhand.android.core.EncoderInfo
+import app.airhand.android.core.ExtendState
 import app.airhand.android.core.HostHello
 import app.airhand.android.core.Native
 import app.airhand.android.core.Notice
@@ -22,6 +23,7 @@ import app.airhand.android.core.Quality
 import app.airhand.android.core.ServerState
 import app.airhand.android.core.Stats
 import app.airhand.android.core.SystemAction
+import app.airhand.android.core.VirtualDisplaySpec
 import app.airhand.android.core.optStringOrNull
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -132,6 +134,25 @@ class RemoteSession(
     /** 要防窥模式（开关）：重连时在连接选项里带上，对方就一直保持着。跟着对方说的状态变 */
     @Volatile
     private var privacyWanted = false
+
+    /** 对方的扩展虚拟显示器（无线副屏）状态；对方不支持（手机、旧版本）、重连间隙为 null */
+    val extendState = MutableStateFlow<ExtendState?>(null)
+
+    /** 扩展虚拟显示器激活后对应的显示器名 */
+    val extendDisplay = MutableStateFlow<String?>(null)
+
+    /** 扩展虚拟显示器失败原因（英文技术信息） */
+    val extendDetail = MutableStateFlow<String?>(null)
+
+    /** 本会话选择的扩展副屏规格 */
+    val extendSpec = MutableStateFlow(VirtualDisplaySpec(1920, 1200))
+
+    /** 本会话是否已按屏幕尺寸初始化过一次默认扩展副屏规格（避免每次重开菜单覆盖用户的选择） */
+    private var extendSpecSeeded = false
+
+    /** 期望的扩展副屏规格：重连时在连接选项里带上，断线重连后保持副屏 */
+    @Volatile
+    private var extendWanted: VirtualDisplaySpec? = null
     val quality = MutableStateFlow(
         Preset.of(app.settings.value.preset).quality(
             VideoDecoder.decodable.firstOrNull { it in Codec.PRIORITY } ?: Codec.H264,
@@ -256,8 +277,8 @@ class RemoteSession(
                 // 开始时的画质和要不要声音在端到端握手里就告诉对方：它一开始就按这个建编码器
                 val withAudio = audioOn.value && !background
                 sentAudio = withAudio
-                // 防窥模式也在握手里就说：断线重连时对方一直保持着，它的屏幕不会在重连的间隙露出来
-                val cmd = Commands.connect(code, resume, settings, hostKey, pairing, withAudio, privacyWanted)
+                // 防窥模式与扩展副屏也在握手里就说：断线重连时对方保持原状态
+                val cmd = Commands.connect(code, resume, settings, hostKey, pairing, withAudio, privacyWanted, extendWanted)
                 val r = runCatching { JSONObject(Native.ctlCall(h, cmd.toString())) }
                     .getOrElse { JSONObject().put("err", JSONObject().put("kind", "failed").put("detail", it.toString())) }
                 if (closed) {
@@ -550,13 +571,24 @@ class RemoteSession(
                 privacyDetail.value = e.optStringOrNull("detail")
                 privacyState.value = s
             }
+            "extend" -> {
+                val s = ExtendState.fromWire(e.optStringOrNull("state"))
+                // 与防窥模式一致，跟着对方说的变：开启 / 启动中记着当前规格供断线重连携带
+                extendWanted = if (s.active) extendSpec.value else null
+                extendDisplay.value = e.optStringOrNull("display")
+                extendDetail.value = e.optStringOrNull("detail")
+                extendState.value = s
+            }
         }
     }
 
-    /** 新的会话、会话断了：对方还没说它的防窥模式（不显示开关）。要不要开着（[privacyWanted]）留着，重连时告诉对方 */
+    /** 新的会话、会话断了：对方还没重新说防窥与扩展副屏状态（期望值留着，重连时告诉对方） */
     private fun resetPrivacy() {
         privacyState.value = null
         privacyDetail.value = null
+        extendState.value = null
+        extendDisplay.value = null
+        extendDetail.value = null
     }
 
     /** 现在能不能把手机上的文件放进对方的剪贴板（连着） */
@@ -701,6 +733,42 @@ class RemoteSession(
         command { Commands.privacy(it, on) }
         privacyDetail.value = null
         privacyState.value = if (on) PrivacyState.STARTING else PrivacyState.OFF
+    }
+
+    /** 首次进入显示器菜单时用当前设备屏幕尺寸初始化一次扩展副屏默认规格 */
+    fun seedExtendSpec(spec: VirtualDisplaySpec) {
+        if (extendSpecSeeded) return
+        extendSpecSeeded = true
+        if (extendWanted == null && extendState.value?.active != true) {
+            extendSpec.value = spec
+        }
+    }
+
+    /** 更新本会话选中的扩展副屏规格（开启中则立即切换，未开启时仅记住选择） */
+    fun setExtendSpec(spec: VirtualDisplaySpec) {
+        extendSpecSeeded = true
+        extendSpec.value = spec
+        if (extendState.value?.active == true) setExtend(spec)
+    }
+
+    /**
+     * 开启 / 调整 / 关闭对方的扩展虚拟显示器（无线副屏）：对方保留本机物理显示器，同时新增一块指定分辨率的虚拟副屏，
+     * 开启成功后会自动切换到这块副屏。spec 为 null 时关闭虚拟副屏
+     */
+    fun setExtend(spec: VirtualDisplaySpec?) {
+        if (viewOnly) return
+        val s = extendState.value
+        if (s != null && !s.usable) return
+        if (spec != null) {
+            extendSpecSeeded = true
+            extendSpec.value = spec
+        }
+        extendWanted = spec
+        if (s == null || handle == 0L || sid < 0 || closed) return
+        command { Commands.extend(it, spec) }
+        extendDetail.value = null
+        if (spec == null) extendDisplay.value = null
+        extendState.value = if (spec != null) ExtendState.STARTING else ExtendState.OFF
     }
 
     @Synchronized

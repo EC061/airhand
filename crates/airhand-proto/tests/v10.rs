@@ -65,6 +65,7 @@ fn signal_and_handshake_layout() {
             audio: true,
             view: vec![],
             privacy: false,
+            extend: None,
         },
         "8601625043615785181e190fa0190438f500f580",
     );
@@ -78,8 +79,28 @@ fn signal_and_handshake_layout() {
             audio: true,
             view: vec![],
             privacy: true,
+            extend: None,
         },
         "8701625043615785181e190fa0190438f500f580f5",
+    );
+    // 扩展虚拟显示器：开启时写出（privacy 为 false 时占位 null）
+    golden(
+        ControllerIntro {
+            version: SESSION_VERSION,
+            name: "PC".into(),
+            os: "W".into(),
+            settings: QualitySettings::default(),
+            audio: true,
+            view: vec![],
+            privacy: false,
+            extend: Some(VirtualDisplaySpec {
+                width: 1920,
+                height: 1200,
+                hz: 60,
+                hidpi: false,
+            }),
+        },
+        "8801625043615785181e190fa0190438f500f580f4831907801904b0183c",
     );
     golden(
         HostVerdict {
@@ -209,6 +230,34 @@ fn session_messages_layout() {
         "820e82056178",
     );
     golden(ControllerMsg::Privacy { on: true }, "820d81f5");
+    golden(
+        HostMsg::Extend {
+            state: ExtendState::On,
+            display: Some("DP-1".into()),
+            detail: None,
+        },
+        "820f82046444502d31",
+    );
+    golden(
+        HostMsg::Extend {
+            state: ExtendState::Failed,
+            display: None,
+            detail: Some("x".into()),
+        },
+        "820f8305f66178",
+    );
+    golden(
+        ControllerMsg::Extend {
+            spec: Some(VirtualDisplaySpec {
+                width: 1920,
+                height: 1200,
+                hz: 60,
+                hidpi: true,
+            }),
+        },
+        "820e81841907801904b0183cf5",
+    );
+    golden(ControllerMsg::Extend { spec: None }, "820e80");
 }
 
 #[test]

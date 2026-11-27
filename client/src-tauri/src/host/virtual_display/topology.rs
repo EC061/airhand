@@ -323,6 +323,100 @@ pub(super) fn isolate() -> Result<()> {
     Ok(())
 }
 
+/// 保留当前在桌面上的本机显示器，同时启用虚拟显示器作为扩展副屏（不存进 Windows 显示设置数据库）。
+/// 优先沿用现有物理显示器的模式并请求 Windows 补齐新虚拟路径的模式；不行时退回系统原生的 `SDC_TOPOLOGY_EXTEND`，
+/// 再退回 `SDC_TOPOLOGY_SUPPLIED`
+pub(super) fn extend() -> Result<()> {
+    let cfg = query(QDC_ALL_PATHS)?;
+    let mut adapters = Adapters::default();
+    let mut chosen: Vec<DISPLAYCONFIG_PATH_INFO> = Vec::new();
+    let mut sources: HashSet<Target> = HashSet::new();
+    let mut targets: HashSet<Target> = HashSet::new();
+    let mut has_virtual = false;
+    for p in &cfg.paths {
+        if active(p) {
+            if adapters.is_virtual(p.targetInfo.adapterId) {
+                has_virtual = true;
+            }
+            sources.insert(source(p));
+            targets.insert(target(p));
+            chosen.push(*p);
+        }
+    }
+    if !has_virtual {
+        for p in &cfg.paths {
+            if active(p)
+                || !p.targetInfo.targetAvailable.as_bool()
+                || !adapters.is_virtual(p.targetInfo.adapterId)
+                || targets.contains(&target(p))
+                || sources.contains(&source(p))
+            {
+                continue;
+            }
+            let mut q = *p;
+            q.flags |= DISPLAYCONFIG_PATH_ACTIVE;
+            q.sourceInfo.Anonymous.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+            q.targetInfo.Anonymous.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+            sources.insert(source(&q));
+            targets.insert(target(&q));
+            chosen.push(q);
+            has_virtual = true;
+            break;
+        }
+    }
+    ensure!(has_virtual, "the virtual display isn't connected");
+
+    let mut modes: Vec<DISPLAYCONFIG_MODE_INFO> = Vec::new();
+    for q in &mut chosen {
+        unsafe {
+            for idx in [
+                &mut q.sourceInfo.Anonymous.modeInfoIdx,
+                &mut q.targetInfo.Anonymous.modeInfoIdx,
+            ] {
+                if *idx == DISPLAYCONFIG_PATH_MODE_IDX_INVALID {
+                    continue;
+                }
+                let Some(m) = cfg.modes.get(*idx as usize) else {
+                    *idx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+                    continue;
+                };
+                *idx = modes.len() as u32;
+                modes.push(*m);
+            }
+        }
+    }
+    let r = unsafe {
+        SetDisplayConfig(
+            Some(&chosen),
+            (!modes.is_empty()).then_some(modes.as_slice()),
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES,
+        )
+    };
+    if r == 0 {
+        return Ok(());
+    }
+    let ext = unsafe { SetDisplayConfig(None, None, SDC_APPLY | SDC_TOPOLOGY_EXTEND) };
+    if ext == 0 {
+        return Ok(());
+    }
+    for q in &mut chosen {
+        q.sourceInfo.Anonymous.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+        q.targetInfo.Anonymous.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+    }
+    let again = unsafe {
+        SetDisplayConfig(
+            Some(&chosen),
+            None,
+            SDC_APPLY | SDC_TOPOLOGY_SUPPLIED | SDC_ALLOW_PATH_ORDER_CHANGES,
+        )
+    };
+    ensure!(
+        again == 0,
+        "SetDisplayConfig(extend) failed ({r}, extend={ext}, supplied={again})"
+    );
+    Ok(())
+}
+
 /// 按 Windows 记着的设置（接着的这几个显示器上次的样子）恢复：防窥结束、意外退出之后
 pub(super) fn restore() -> Result<()> {
     let r = unsafe { SetDisplayConfig(None, None, SDC_APPLY | SDC_USE_DATABASE_CURRENT) };

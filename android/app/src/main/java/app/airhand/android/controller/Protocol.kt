@@ -2,6 +2,7 @@ package app.airhand.android.controller
 
 import app.airhand.android.core.Codec
 import app.airhand.android.core.Quality
+import app.airhand.android.core.VirtualDisplaySpec
 import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.ByteBuffer
@@ -119,10 +120,19 @@ object Commands {
         pairing: String? = null,
         audio: Boolean = false,
         privacy: Boolean = false,
-    ): JSONObject = options(resume, settings, hostKey, pairing, audio, privacy).put("cmd", "connect").put("code", code)
+        extend: VirtualDisplaySpec? = null,
+    ): JSONObject = options(resume, settings, hostKey, pairing, audio, privacy, extend).put("cmd", "connect").put("code", code)
 
     /** 连接选项（`ConnectOptions`） */
-    fun options(resume: String?, settings: Quality, hostKey: String?, pairing: String?, audio: Boolean, privacy: Boolean): JSONObject =
+    fun options(
+        resume: String?,
+        settings: Quality,
+        hostKey: String?,
+        pairing: String?,
+        audio: Boolean,
+        privacy: Boolean,
+        extend: VirtualDisplaySpec? = null,
+    ): JSONObject =
         JSONObject()
             .put("resume", Resume.toJson(resume))
             .put("hostKey", hostKey ?: JSONObject.NULL)
@@ -130,6 +140,7 @@ object Commands {
             .put("settings", settings.toJson())
             .put("audio", audio)
             .put("privacy", privacy)
+            .apply { if (extend != null) put("extend", extend.toJson()) }
 
     fun input(sid: Int, events: JSONArray): JSONObject = cmd("input", sid).put("events", events)
     fun settings(sid: Int, q: Quality): JSONObject = cmd("settings", sid).put("settings", q.toJson())
@@ -139,6 +150,10 @@ object Commands {
 
     /** 打开 / 关闭对方的防窥模式（对方说过它的状态之后才有用，见 [RemoteSession.setPrivacy]） */
     fun privacy(sid: Int, on: Boolean): JSONObject = cmd("privacy", sid).put("on", on)
+
+    /** 开启 / 调整 / 关闭对方的扩展虚拟显示器（无线副屏，spec 为 null 时关闭） */
+    fun extend(sid: Int, spec: VirtualDisplaySpec?): JSONObject =
+        cmd("extend", sid).put("spec", spec?.toJson() ?: JSONObject.NULL)
     fun clipboard(sid: Int, text: String): JSONObject = cmd("clipboard", sid).put("text", text)
     fun disconnect(sid: Int): JSONObject = cmd("disconnect", sid)
 }

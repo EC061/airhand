@@ -24,7 +24,9 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use airhand_proto::session::{ByeReason, HostMsg, InputEvent, QualitySettings, StreamView};
+use airhand_proto::session::{
+    ByeReason, HostMsg, InputEvent, QualitySettings, StreamView, VirtualDisplaySpec,
+};
 use anyhow::{Result, bail};
 use bytes::Bytes;
 use tokio::sync::{mpsc, watch};
@@ -153,6 +155,8 @@ pub enum Request {
     Mic(bool),
     /// 打开 / 关闭防窥模式（见 `airhand_proto::session` 的"防窥模式"）。不支持的平台什么也不做
     Privacy(bool),
+    /// 开启 / 调整 / 关闭扩展虚拟显示器（`Some(spec)` 开启或调整，`None` 关闭；spec 已做范围校验）
+    Extend(Option<VirtualDisplaySpec>),
 }
 
 /// 控制端要看的显示器（[`Request::View`]）落到这台被控端上（`displays` 个显示器，最多同时发 `max` 路）：
@@ -184,6 +188,8 @@ pub struct Start {
     pub view: Vec<StreamView>,
     /// 一开始就要防窥模式（重连时控制端带上的，见 `airhand_proto::session` 的"防窥模式"）
     pub privacy: bool,
+    /// 一开始就要扩展虚拟显示器（重连时控制端带上的）
+    pub extend: Option<VirtualDisplaySpec>,
 }
 
 /// 交给平台的发送端（[`serve`] 的 `platform` 拿到它们）
@@ -329,6 +335,7 @@ async fn drive<P: Platform>(
             audio: admitted.audio,
             view: admitted.view.clone(),
             privacy: admitted.privacy,
+            extend: admitted.extend,
         })
         .await?;
     info!(session_id, "session started");
@@ -491,6 +498,7 @@ mod tests {
             audio: true,
             view: Vec::new(),
             privacy: false,
+            extend: None,
         }
     }
 
@@ -664,6 +672,7 @@ mod tests {
                     audio: true,
                     view: Vec::new(),
                     privacy: false,
+                    extend: None,
                 }),
                 Call::Request(Request::Input(click())),
                 Call::Request(Request::Settings(fast().sanitized())),
