@@ -1,4 +1,4 @@
-//! Runtime-loaded (`dlopen`) FFmpeg (`libavcodec` 60/61/62 + its linked `libavutil` 58/59/60).
+//! Runtime-loaded (`dlopen`) FFmpeg (`libavcodec` 60–63 + its linked `libavutil` 58–61).
 //!
 //! All symbols are looked up through a single `libavcodec.so.N` handle so `avutil` always matches
 //! the exact library `libavcodec` was linked against. Struct field access goes through `ffmpeg_abi.c`
@@ -173,7 +173,10 @@ unsafe fn init_from_handle(handle: *mut c_void) -> Result<FfmpegApi> {
         let avcodec_major = (avcodec_version() >> 16) as c_int;
         let avutil_major = (avutil_version() >> 16) as c_int;
 
-        if !matches!((avcodec_major, avutil_major), (60, 58) | (61, 59) | (62, 60)) {
+        if !matches!(
+            (avcodec_major, avutil_major),
+            (60, 58) | (61, 59) | (62, 60) | (63, 61)
+        ) {
             bail!(
                 "unsupported FFmpeg ABI pair libavcodec.{avcodec_major} / libavutil.{avutil_major}"
             );
@@ -296,18 +299,23 @@ unsafe fn init_from_handle(handle: *mut c_void) -> Result<FfmpegApi> {
     }
 }
 
-/// Process-wide FFmpeg handle (FFmpeg 8 -> 7 -> 6). Returns `None` if unavailable.
+/// Process-wide FFmpeg handle (FFmpeg 9 -> 8 -> 7 -> 6). Returns `None` if unavailable.
 pub(super) fn api() -> Option<&'static FfmpegApi> {
     static API: OnceLock<Option<FfmpegApi>> = OnceLock::new();
     API.get_or_init(|| {
-        for soname in [c"libavcodec.so.62", c"libavcodec.so.61", c"libavcodec.so.60"] {
+        for soname in [
+            c"libavcodec.so.63",
+            c"libavcodec.so.62",
+            c"libavcodec.so.61",
+            c"libavcodec.so.60",
+        ] {
             match try_load_soname(soname) {
                 Ok(api) => return Some(api),
                 Err(e) => debug!(soname = %soname.to_string_lossy(), "FFmpeg load skipped: {e:#}"),
             }
         }
         warn!(
-            "no supported libavcodec (60/61/62) found; Linux hardware encoding unavailable, \
+            "no supported libavcodec (60-63) found; Linux hardware encoding unavailable, \
              using software OpenH264"
         );
         None

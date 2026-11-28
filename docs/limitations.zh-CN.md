@@ -46,7 +46,7 @@
 ## Linux
 
 - 被控端只支持 **X11** 桌面。Wayland 下只能看到 / 操作 X11（XWayland）程序，原生 Wayland 窗口是黑的，控制端会提示改用 X11（Xorg）会话登录。完整的 Wayland 支持需要 xdg-desktop-portal 屏幕共享（每次都要本机用户确认），尚未实现
-- 被控端硬件编码在运行时动态加载系统 FFmpeg（`libavcodec` 60 / 61 / 62，对应 FFmpeg 6 / 7 / 8），支持 **VA-API**（Intel / AMD）和 **NVENC**（NVIDIA）的 H.264 / HEVC / AV1 编码（VA-API 的 AV1 需要 FFmpeg 6.1+ 及支持 AV1 硬件编码的显卡与驱动）。较老的发行版（如 FFmpeg 4 / 5 的 Ubuntu 22.04、Debian 12）或缺少兼容驱动 / `libavcodec` 时自动回退到 OpenH264 软件编码。双显卡机器默认优先使用正在驱动显示器的那一侧显卡，仅在缺少某种编码格式时回退到另一侧（例如不支持 AV1 的老款 Intel 核显搭配 NVIDIA 独显时，AV1 会唤醒并使用 NVENC）；如需指定，可在 `config.toml` 中设置 `hw_encoder = "auto" | "vaapi" | "nvenc" | "software"`（以及 `vaapi_device = "/dev/dri/renderD128"`），或使用环境变量 `AIRHAND_HW_ENCODER` / `AIRHAND_VAAPI_DEVICE`。Linux 上持续或手动调整码率时会产生一次关键帧（VA-API 需重建编码上下文，FFmpeg NVENC 重配时会强制 IDR）
+- 被控端硬件编码在运行时动态加载系统 FFmpeg（`libavcodec` 60–63，对应 FFmpeg 6–9），支持 **VA-API**（Intel / AMD）和 **NVENC**（NVIDIA）的 H.264 / HEVC / AV1 编码（VA-API 的 AV1 需要 FFmpeg 6.1+ 及支持 AV1 硬件编码的显卡与驱动）。较老的发行版（如 FFmpeg 4 / 5 的 Ubuntu 22.04、Debian 12）或缺少兼容驱动 / `libavcodec` 时自动回退到 OpenH264 软件编码。双显卡机器默认优先使用正在驱动显示器的那一侧显卡，仅在缺少某种编码格式时回退到另一侧（例如不支持 AV1 的老款 Intel 核显搭配 NVIDIA 独显时，AV1 会唤醒并使用 NVENC）；如需指定，可在 `config.toml` 中设置 `hw_encoder = "auto" | "vaapi" | "nvenc" | "software"`（以及 `vaapi_device = "/dev/dri/renderD128"`），或使用环境变量 `AIRHAND_HW_ENCODER` / `AIRHAND_VAAPI_DEVICE`。Linux 上持续或手动调整码率时会产生一次关键帧（VA-API 需重建编码上下文，FFmpeg NVENC 重配时会强制 IDR）
 - 锁屏无法操作（屏保程序会独占键鼠）
 - 接收对方复制的文件要 FUSE（`fusermount3` 和 `/dev/fuse`）：没有的话（例如在容器里）只同步文本。剪贴板用的是 X11 的 CLIPBOARD，原生 Wayland 程序要经 XWayland 才看得到
 - 控制端的解码依赖 WebKitGTK + GStreamer：H.264 需要 `gstreamer1.0-plugins-bad`（解析）和 `gstreamer1.0-libav` 或 openh264（解码）；AV1 / HEVC 取决于装了哪些 GStreamer 解码器。某种格式实际解不出画面时，控制端会按优先级改用下一个可用的格式

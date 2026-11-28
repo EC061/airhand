@@ -1,7 +1,7 @@
 //! Linux 硬件视频编码（Intel / AMD VA-API 与 NVIDIA NVENC），支持 H.264 / HEVC / AV1。
 //!
-//! * 运行时通过 `dlopen` 加载系统 `libavcodec`（60 / 61 / 62，对应 FFmpeg 6 / 7 / 8）及其链接的
-//!   `libavutil`（58 / 59 / 60），编译期不需要任何 FFmpeg `-dev` 头文件，运行时缺失时安静回退到 OpenH264；
+//! * 运行时通过 `dlopen` 加载系统 `libavcodec`（60–63，对应 FFmpeg 6–9）及其链接的
+//!   `libavutil`（58–61），编译期不需要任何 FFmpeg `-dev` 头文件，运行时缺失时安静回退到 OpenH264；
 //! * **VA-API**（`h264_vaapi` / `hevc_vaapi` / `av1_vaapi`）：Intel 核显/独显、AMD 显卡；
 //! * **NVENC**（`h264_nvenc` / `hevc_nvenc` / `av1_nvenc`）：NVIDIA 显卡；
 //! * **双显卡自动选择**（`hw_encoder = "auto"`）：优先选正在驱动已连接显示器的那一侧（例如 Intel 核显与

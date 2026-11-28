@@ -1,6 +1,6 @@
-// Minimal ABI accessor shim for runtime-loaded FFmpeg (libavcodec 60/61/62 + libavutil 58/59/60).
+// Minimal ABI accessor shim for runtime-loaded FFmpeg (libavcodec 60-63 + libavutil 58-61).
 //
-// Struct prefixes are verified against upstream FFmpeg headers (n6.1.2, n7.1.1, n8.0) so the C
+// Struct prefixes are verified against upstream FFmpeg headers (6.1, 7.1, 8.0, 9.0) so the C
 // compiler computes exact alignment and padding for both x86_64 and aarch64 without requiring
 // system FFmpeg -dev headers at build time. Non-AVOption AVCodecContext fields (hw_frames_ctx,
 // framerate) are additionally anchored and checked against runtime av_opt_find() offsets.
@@ -149,7 +149,7 @@ int ah_av_hwframes_configure(
         fc->height = h;
         return 0;
     }
-    if (avutil_major == 59 || avutil_major == 60) {
+    if (avutil_major == 59 || avutil_major == 60 || avutil_major == 61) {
         AhHWFramesContext59 *fc = (AhHWFramesContext59 *)data;
         fc->initial_pool_size = pool_size;
         fc->format = hw_fmt;
@@ -170,7 +170,7 @@ int ah_av_frame_set_params(void *frame, int avutil_major, int w, int h, int form
         f->format = format;
         return 0;
     }
-    if (avutil_major == 60) {
+    if (avutil_major == 60 || avutil_major == 61) {
         AhFrame60 *f = (AhFrame60 *)frame;
         f->width = w;
         f->height = h;
@@ -187,7 +187,7 @@ uint8_t *ah_av_frame_plane(void *frame, int avutil_major, int plane, int *linesi
         if (linesize_out) *linesize_out = f->linesize[plane];
         return f->data[plane];
     }
-    if (avutil_major == 60) {
+    if (avutil_major == 60 || avutil_major == 61) {
         AhFrame60 *f = (AhFrame60 *)frame;
         if (linesize_out) *linesize_out = f->linesize[plane];
         return f->data[plane];
@@ -201,7 +201,7 @@ int ah_av_frame_set_pict_type(void *frame, int avutil_major, int pict_type) {
         ((AhFrame58 *)frame)->pict_type = pict_type;
         return 0;
     }
-    if (avutil_major == 60) {
+    if (avutil_major == 60 || avutil_major == 61) {
         ((AhFrame60 *)frame)->pict_type = pict_type;
         return 0;
     }
@@ -214,7 +214,7 @@ int ah_av_frame_set_pts(void *frame, int avutil_major, int64_t pts) {
         ((AhFrame58 *)frame)->pts = pts;
         return 0;
     }
-    if (avutil_major == 60) {
+    if (avutil_major == 60 || avutil_major == 61) {
         ((AhFrame60 *)frame)->pts = pts;
         return 0;
     }
@@ -253,7 +253,7 @@ int ah_av_ctx_hw_frames_offset(
         int off = off_max_pixels - (int)offsetof(AhCtxHw60, max_pixels);
         return (off % (int)sizeof(void *) == 0) ? off : -1;
     }
-    if (avcodec_major == 61 || avcodec_major == 62) {
+    if (avcodec_major == 61 || avcodec_major == 62 || avcodec_major == 63) {
         if (off_hwaccel_flags < (int)offsetof(AhCtxHw61, hwaccel_flags) || off_extra_hw_frames < 0) {
             return -1;
         }
@@ -276,7 +276,7 @@ int ah_av_ctx_framerate_offset(int avcodec_major, int off_time_base, int off_pkt
         int off = off_pkt_timebase - (int)offsetof(AhCtxFps60, pkt_timebase);
         return (off % (int)sizeof(int) == 0) ? off : -1;
     }
-    if (avcodec_major == 61 || avcodec_major == 62) {
+    if (avcodec_major == 61 || avcodec_major == 62 || avcodec_major == 63) {
         if (off_time_base < 0 || off_pkt_timebase < 0) {
             return -1;
         }
