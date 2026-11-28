@@ -95,6 +95,43 @@ const KEEP_CHECK: Duration = if cfg!(test) {
     Duration::from_secs(3)
 };
 
+/// Linux 硬件编码器选择（`hw_encoder`，`config.toml` 可选，也可用环境变量 `AIRHAND_HW_ENCODER` 覆盖）。
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HwEncoderPref {
+    /// 自动：优先选正在驱动已连接显示器的那一侧显卡（VA-API / NVENC），缺失的格式回退到另一侧
+    #[default]
+    Auto,
+    /// 只使用 VA-API（Intel / AMD）
+    Vaapi,
+    /// 只使用 NVIDIA NVENC
+    Nvenc,
+    /// 禁用硬件编码，只使用 OpenH264 软件编码
+    Software,
+}
+
+#[cfg(target_os = "linux")]
+impl HwEncoderPref {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "vaapi" => Some(Self::Vaapi),
+            "nvenc" => Some(Self::Nvenc),
+            "software" | "cpu" | "off" => Some(Self::Software),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Vaapi => "vaapi",
+            Self::Nvenc => "nvenc",
+            Self::Software => "software",
+        }
+    }
+}
+
 /// 进程启动时读到的配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -120,6 +157,12 @@ pub struct Settings {
     /// （[`save_pause_awdl`]，马上生效，不用重新启动）
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub pause_awdl: bool,
+    /// Linux 硬件编码后端偏好（`hw_encoder`，模板里没有它：默认 `"auto"`）
+    #[cfg(target_os = "linux")]
+    pub hw_encoder: HwEncoderPref,
+    /// Linux VA-API 指定渲染节点路径（`vaapi_device`，例如 `"/dev/dri/renderD128"`，模板里没有它）
+    #[cfg(target_os = "linux")]
+    pub vaapi_device: Option<String>,
     /// 服务器分配的控制码和加密过的密钥（`[code]`），用 [`Settings::code`] 解开
     saved_code: Option<(i64, String)>,
 }
@@ -135,6 +178,10 @@ impl Default for Settings {
             lock_on_end: true,
             prevent_sleep: false,
             pause_awdl: false,
+            #[cfg(target_os = "linux")]
+            hw_encoder: HwEncoderPref::Auto,
+            #[cfg(target_os = "linux")]
+            vaapi_device: None,
             saved_code: None,
         }
     }
@@ -258,6 +305,20 @@ fn parse(text: &str) -> Result<Settings> {
         s.language = Lang::from_code(v);
         if s.language.is_none() {
             warn!("config.toml: unknown language {v:?}, following the system language");
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(v) = doc.get("hw_encoder").and_then(|v| v.as_str()) {
+            match HwEncoderPref::parse(v) {
+                Some(p) => s.hw_encoder = p,
+                None => warn!("config.toml: unknown hw_encoder {v:?}, using auto"),
+            }
+        }
+        if let Some(v) = doc.get("vaapi_device").and_then(|v| v.as_str())
+            && !v.trim().is_empty()
+        {
+            s.vaapi_device = Some(v.trim().to_string());
         }
     }
     if let Some(t) = doc.get("code").and_then(|v| v.as_table_like()) {
@@ -530,6 +591,21 @@ fn regenerate(before: Option<&str>) -> Result<DocumentMut> {
     }
     if let Some(on) = old.get("pause_awdl").and_then(Item::as_bool) {
         put_pause_awdl(&mut doc, on);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(v) = old
+            .get("hw_encoder")
+            .and_then(Item::as_str)
+            .and_then(HwEncoderPref::parse)
+        {
+            doc["hw_encoder"] = toml_edit::value(v.as_str());
+        }
+        if let Some(v) = old.get("vaapi_device").and_then(Item::as_str)
+            && !v.trim().is_empty()
+        {
+            doc["vaapi_device"] = toml_edit::value(v.trim());
+        }
     }
     if let (Some(from), Some(to)) = (
         old.get("code").and_then(Item::as_table_like),
@@ -1817,5 +1893,31 @@ mod tests {
     fn bundle_id_matches_tauri_conf() {
         let conf = include_str!("../tauri.conf.json");
         assert!(conf.contains(&format!("\"identifier\": \"{BUNDLE_ID}\"")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_hw_encoder_config_roundtrip() {
+        let s = parse("hw_encoder = \"nvenc\"\nvaapi_device = \"/dev/dri/renderD128\"\n").unwrap();
+        assert_eq!(s.hw_encoder, HwEncoderPref::Nvenc);
+        assert_eq!(s.vaapi_device.as_deref(), Some("/dev/dri/renderD128"));
+
+        let s = parse("hw_encoder = \"VAAPI\"\n").unwrap();
+        assert_eq!(s.hw_encoder, HwEncoderPref::Vaapi);
+
+        let s = parse("hw_encoder = \"software\"\n").unwrap();
+        assert_eq!(s.hw_encoder, HwEncoderPref::Software);
+
+        let s = parse("hw_encoder = \"invalid\"\n").unwrap();
+        assert_eq!(s.hw_encoder, HwEncoderPref::Auto);
+
+        let regen = regenerate(Some(
+            "hw_encoder = \"vaapi\"\nvaapi_device = \"/dev/dri/renderD128\"\n",
+        ))
+        .unwrap()
+        .to_string();
+        let parsed = parse(&regen).unwrap();
+        assert_eq!(parsed.hw_encoder, HwEncoderPref::Vaapi);
+        assert_eq!(parsed.vaapi_device.as_deref(), Some("/dev/dri/renderD128"));
     }
 }

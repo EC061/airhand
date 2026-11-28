@@ -219,6 +219,7 @@ fn run(ctrl: Arc<Ctrl>, stream: u8, screen: u8, video: mpsc::Sender<Bytes>, out:
         if v != ver {
             ver = v;
             let prev_short = settings.max_short;
+            let prev_bitrate = settings.bitrate_kbps;
             settings = *ctrl.settings.lock().unwrap();
             // 只有 macOS 在采集时缩放，其余平台改分辨率不用换采集
             let resized = cfg!(target_os = "macos") && settings.max_short != prev_short;
@@ -245,6 +246,11 @@ fn run(ctrl: Arc<Ctrl>, stream: u8, screen: u8, video: mpsc::Sender<Bytes>, out:
                 .set_target(settings.bitrate_kbps, settings.adaptive);
             if let Some(e) = &mut enc {
                 e.set_bitrate(ctrl.flow.bitrate_kbps());
+                // Linux 硬件编码器改码率需要关键帧（VA-API 重建上下文 / NVENC 强制 IDR），
+                // 用户手动调整码率上限时请求一次关键帧让新码率立即生效
+                if cfg!(target_os = "linux") && settings.bitrate_kbps != prev_bitrate {
+                    ctrl.force_key.store(true, Ordering::Release);
+                }
                 // 需要重建编码器（例如换了编码格式）：用上一帧马上重建，画面静止时也立即生效，
                 // 控制端也能马上收到新的 HostMsg::Encoder（界面上显示的是实际在用的格式）
                 if let Some(f) = &last_frame
