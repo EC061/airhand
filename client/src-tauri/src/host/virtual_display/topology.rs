@@ -427,8 +427,8 @@ pub(super) fn restore() -> Result<()> {
     Ok(())
 }
 
-/// 桌面上的第一个虚拟显示器：GDI 名字和现在的大小
-fn virtual_source() -> Option<(String, u32, u32)> {
+/// 桌面上的第一个虚拟显示器：GDI 名字、当前分辨率和刷新率（Hz）
+fn virtual_source() -> Option<(String, u32, u32, u32)> {
     let cfg = query(QDC_ONLY_ACTIVE_PATHS).ok()?;
     let mut adapters = Adapters::default();
     cfg.paths.iter().find_map(|p| {
@@ -437,7 +437,13 @@ fn virtual_source() -> Option<(String, u32, u32)> {
         }
         let m = source_mode(&cfg, p)?;
         let name = source_name(p.sourceInfo.adapterId, p.sourceInfo.id)?;
-        Some((name, m.width, m.height))
+        let r = p.targetInfo.refreshRate;
+        let hz = if r.Denominator > 0 {
+            (r.Numerator as f64 / r.Denominator as f64).round() as u32
+        } else {
+            0
+        };
+        Some((name, m.width, m.height, hz))
     })
 }
 
@@ -446,14 +452,15 @@ pub(super) fn virtual_name() -> Option<String> {
     virtual_source().map(|(name, ..)| name.trim_start_matches(r"\\.\").to_string())
 }
 
-/// 桌面上的虚拟显示器换成 `mode`（大小不一样的话）。只改这一次（不存进注册表）：下次启用时驱动的首选就是它
-/// （见 `super::device::write_settings`），这里只是防 Windows 套用以前记着的分辨率。
+/// 桌面上的虚拟显示器换成 `mode`（分辨率或刷新率不一样的话）。只改这一次（不存进注册表）：下次启用时驱动的首选就是它
+/// （见 `super::device::write_settings`），这里只是防 Windows 套用以前记着的分辨率或刷新率。
+/// `allow_hz_fallback` 为 true 时，若驱动拒绝目标刷新率则退回只改分辨率；为 false 时返回错误以便上层重写 `vdd_settings.xml` 后重载驱动。
 /// 返回有没有虚拟显示器在桌面上（没有就是还不用改）
-pub(super) fn apply_mode(mode: Mode) -> Result<bool> {
-    let Some((name, w, h)) = virtual_source() else {
+pub(super) fn apply_mode(mode: Mode, allow_hz_fallback: bool) -> Result<bool> {
+    let Some((name, w, h, hz)) = virtual_source() else {
         return Ok(false);
     };
-    if (w, h) == (mode.width, mode.height) {
+    if (w, h) == (mode.width, mode.height) && hz > 0 && hz.abs_diff(mode.hz) <= 1 {
         return Ok(true);
     }
     let mut dm = DEVMODEW {
@@ -466,16 +473,17 @@ pub(super) fn apply_mode(mode: Mode) -> Result<bool> {
     };
     let name = HSTRING::from(name);
     let mut r = unsafe { ChangeDisplaySettingsExW(&name, Some(&dm), None, CDS_TYPE(0), None) };
-    if r != DISP_CHANGE_SUCCESSFUL {
+    if r != DISP_CHANGE_SUCCESSFUL && allow_hz_fallback {
         // 驱动没有这个刷新率：只改大小
         dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
         r = unsafe { ChangeDisplaySettingsExW(&name, Some(&dm), None, CDS_TYPE(0), None) };
     }
     ensure!(
         r == DISP_CHANGE_SUCCESSFUL,
-        "can't set the virtual display to {}x{} ({})",
+        "can't set the virtual display to {}x{}@{}Hz ({})",
         mode.width,
         mode.height,
+        mode.hz,
         r.0
     );
     Ok(true)

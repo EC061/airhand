@@ -945,7 +945,7 @@ private fun Quality(session: RemoteSession) {
     val q by session.quality.collectAsState()
     val hello by session.hello.collectAsState()
     val encoder by session.encoder.collectAsState()
-    val current = Preset.match(q)
+    val current = Preset.matchClarity(q)
     Preset.entries.forEach { p ->
         Row(
             Modifier
@@ -960,6 +960,17 @@ private fun Quality(session: RemoteSession) {
                 Text(presetName(p), style = MaterialTheme.typography.bodyLarge)
                 Text(presetDesc(p), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+        }
+    }
+    HorizontalDivider(Modifier.padding(vertical = 8.dp, horizontal = 16.dp))
+    Text(stringResource(R.string.quality_fps), style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp))
+    FlowRow(Modifier.padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(30, 60, 90, 120).forEach { fps ->
+            FilterChip(
+                selected = q.fps == fps,
+                onClick = { session.setFps(fps) },
+                label = { Text(stringResource(R.string.fps_value, fps)) },
+            )
         }
     }
     HorizontalDivider(Modifier.padding(vertical = 8.dp, horizontal = 16.dp))
@@ -1338,11 +1349,12 @@ private fun ExtendDisplay(session: RemoteSession, os: OsKind) {
         return
     }
     val dm = ctx.resources.displayMetrics
-    val nativeSpec = remember(dm.widthPixels, dm.heightPixels, currentSpec.hidpi) {
-        VirtualDisplaySpec.matchScreen(dm.widthPixels, dm.heightPixels, hidpi = currentSpec.hidpi)
+    val defaultHz = remember(ctx) { if (os == OsKind.MAC) 60 else deviceMaxRefreshHz(ctx) }
+    val nativeSpec = remember(dm.widthPixels, dm.heightPixels, currentSpec.hz, currentSpec.hidpi) {
+        VirtualDisplaySpec.matchScreen(dm.widthPixels, dm.heightPixels, hz = currentSpec.hz, hidpi = currentSpec.hidpi)
     }
-    LaunchedEffect(session, nativeSpec.width, nativeSpec.height) {
-        session.seedExtendSpec(nativeSpec)
+    LaunchedEffect(session, dm.widthPixels, dm.heightPixels, defaultHz) {
+        session.seedExtendSpec(VirtualDisplaySpec.matchScreen(dm.widthPixels, dm.heightPixels, hz = defaultHz))
     }
     val hint = when (s) {
         ExtendState.UNAVAILABLE -> stringResource(
@@ -1354,7 +1366,7 @@ private fun ExtendDisplay(session: RemoteSession, os: OsKind) {
         )
         ExtendState.NOT_ALLOWED -> stringResource(R.string.extend_not_allowed)
         ExtendState.STARTING -> stringResource(R.string.extend_starting)
-        ExtendState.ON -> stringResource(R.string.extend_on, display ?: "—", currentSpec.width, currentSpec.height)
+        ExtendState.ON -> stringResource(R.string.extend_on_hz, display ?: "—", currentSpec.width, currentSpec.height, currentSpec.hz)
         ExtendState.FAILED -> stringResource(R.string.extend_failed, detail ?: "—")
         ExtendState.OFF -> stringResource(R.string.extend_off)
     }
@@ -1385,7 +1397,7 @@ private fun ExtendDisplay(session: RemoteSession, os: OsKind) {
             modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
         )
         fun pick(spec: VirtualDisplaySpec) {
-            val next = spec.copy(hidpi = if (os == OsKind.MAC) currentSpec.hidpi else false)
+            val next = spec.copy(hz = if (os == OsKind.MAC) 60 else currentSpec.hz, hidpi = if (os == OsKind.MAC) currentSpec.hidpi else false)
             session.setExtendSpec(next)
         }
         FlowRow(
@@ -1418,6 +1430,25 @@ private fun ExtendDisplay(session: RemoteSession, os: OsKind) {
                     onClick = { session.setExtendSpec(currentSpec.copy(hidpi = !currentSpec.hidpi)) },
                     label = { Text(stringResource(R.string.extend_hidpi)) },
                 )
+            }
+        }
+        if (os != OsKind.MAC) {
+            Text(
+                stringResource(R.string.extend_refresh_rate),
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
+            )
+            FlowRow(
+                Modifier.padding(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                VirtualDisplaySpec.REFRESH_RATES.forEach { hz ->
+                    FilterChip(
+                        selected = currentSpec.hz == hz,
+                        onClick = { session.setMonitorRefreshRate(hz) },
+                        label = { Text(stringResource(R.string.hz_value, hz)) },
+                    )
+                }
             }
         }
     }

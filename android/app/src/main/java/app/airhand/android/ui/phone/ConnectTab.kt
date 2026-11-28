@@ -82,6 +82,7 @@ import app.airhand.android.ui.OsAvatar
 import app.airhand.android.ui.SectionTitle
 import app.airhand.android.ui.ServerPill
 import app.airhand.android.ui.session.SessionActivity
+import app.airhand.android.ui.session.deviceMaxRefreshHz
 import app.airhand.android.ui.theme.Brand
 import kotlinx.coroutines.launch
 
@@ -114,7 +115,7 @@ fun ConnectTab(modifier: Modifier, snackbar: SnackbarHostState, onOpenSettings: 
 
     fun nativeMonitorSpec(): VirtualDisplaySpec {
         val dm = ctx.resources.displayMetrics
-        return VirtualDisplaySpec.matchScreen(dm.widthPixels, dm.heightPixels)
+        return VirtualDisplaySpec.matchScreen(dm.widthPixels, dm.heightPixels, hz = deviceMaxRefreshHz(ctx))
     }
 
     // 第一次连接失败：在原地显示原因，会话作废

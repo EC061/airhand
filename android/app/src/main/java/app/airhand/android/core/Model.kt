@@ -49,10 +49,30 @@ enum class Preset(val id: String, val fps: Int, val kbps: Int, val maxShort: Int
     fun quality(codec: Codec) =
         Quality(fps, kbps, maxShort, true, codec)
 
+    /** 按目标帧率生成画质设置：高于预设帧率时按比例放宽码率上限（仍受自适应码率控制） */
+    fun qualityForFps(codec: Codec, targetFps: Int): Quality {
+        val chosenFps = targetFps.coerceIn(1, 120)
+        val scaledKbps = if (chosenFps > fps) {
+            ((kbps.toLong() * (fps + chosenFps)) / (2L * fps)).toInt().coerceAtMost(60_000)
+        } else {
+            kbps
+        }
+        return Quality(chosenFps, scaledKbps, maxShort, true, codec)
+    }
+
     companion object {
         val DEFAULT = BALANCED
         fun of(id: String?) = entries.firstOrNull { it.id == id } ?: DEFAULT
         fun match(q: Quality) = entries.firstOrNull { it.fps == q.fps && it.kbps == q.kbps && it.maxShort == q.maxShort }
+
+        /** 即使单独调整了帧率（如 90 / 120 fps），也识别当前对应的清晰度档位 */
+        fun matchClarity(q: Quality): Preset? = match(q) ?: when (q.maxShort) {
+            0 -> NATIVE
+            1440 -> HD
+            1080 -> if (q.fps >= 45 || q.kbps >= 6000) SMOOTH else BALANCED
+            720 -> SAVER
+            else -> null
+        }
     }
 }
 
@@ -264,6 +284,15 @@ data class VirtualDisplaySpec(
     fun swapped(): VirtualDisplaySpec = copy(width = height, height = width)
 
     companion object {
+        val REFRESH_RATES = listOf(60, 90, 120)
+
+        /** 将设备上报的屏幕刷新率归档到支持的副屏刷新率档位（60 / 90 / 120 Hz） */
+        fun snapHz(rawHz: Float): Int = when {
+            rawHz >= 110f -> 120
+            rawHz >= 80f -> 90
+            else -> 60
+        }
+
         /** 按本机屏幕宽高生成同比例的虚拟显示器规格（偶数像素，长边上限 2560 以兼顾清晰度与编解码性能） */
         fun matchScreen(screenW: Int, screenH: Int, hz: Int = 60, hidpi: Boolean = false): VirtualDisplaySpec {
             var w = screenW.coerceAtLeast(480).toDouble()

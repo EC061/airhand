@@ -199,18 +199,23 @@ const COMMON: [(u32, u32); 10] = [
     (3440, 1440),
 ];
 
-/// 设置文件的内容：一个显示器，`mode` 排第一（首选），再加上几个常见的分辨率（都是 60 Hz）。
+/// 每个分辨率默认都附带的常用刷新率（让 Windows 显示设置和动态切换支持 60 / 90 / 120 Hz，无需反复重启驱动）
+const COMMON_RATES: [u32; 3] = [60, 90, 120];
+
+/// 设置文件的内容：一个显示器，`mode` 排第一（首选），同时提供 60 / 90 / 120 Hz 和几个常见分辨率。
 /// 不写全局的刷新率：驱动会把它们和每个分辨率组合一遍，和单独写的重复
 pub(super) fn settings_xml(mode: Mode) -> String {
     let mut list: Vec<(u32, u32, Vec<u32>)> = Vec::new();
     let mut rates = vec![mode.hz.clamp(24, 240)];
-    if rates[0] != 60 {
-        rates.push(60);
+    for r in COMMON_RATES {
+        if !rates.contains(&r) {
+            rates.push(r);
+        }
     }
     list.push((mode.width, mode.height, rates));
     for (w, h) in COMMON {
         if !list.iter().any(|(lw, lh, _)| (*lw, *lh) == (w, h)) {
-            list.push((w, h, vec![60]));
+            list.push((w, h, COMMON_RATES.to_vec()));
         }
     }
     let mut out = String::from(
@@ -546,7 +551,7 @@ mod tests {
             hz: 144,
         });
         let first = xml.find("<width>").unwrap();
-        assert!(xml[first..].starts_with("<width>2560</width>\n            <height>1440</height>\n            <refresh_rate>144</refresh_rate>\n            <refresh_rate>60</refresh_rate>"));
+        assert!(xml[first..].starts_with("<width>2560</width>\n            <height>1440</height>\n            <refresh_rate>144</refresh_rate>\n            <refresh_rate>60</refresh_rate>\n            <refresh_rate>90</refresh_rate>\n            <refresh_rate>120</refresh_rate>"));
         assert_eq!(
             xml.matches("<width>2560</width>\n            <height>1440</height>")
                 .count(),
@@ -562,5 +567,16 @@ mod tests {
             plain.matches("<refresh_rate>60</refresh_rate>").count(),
             COMMON.len()
         );
+        assert_eq!(
+            plain.matches("<refresh_rate>120</refresh_rate>").count(),
+            COMMON.len()
+        );
+        let high = settings_xml(Mode {
+            width: 2560,
+            height: 1600,
+            hz: 120,
+        });
+        let high_first = high.find("<width>").unwrap();
+        assert!(high[high_first..].starts_with("<width>2560</width>\n            <height>1600</height>\n            <refresh_rate>120</refresh_rate>\n            <refresh_rate>60</refresh_rate>\n            <refresh_rate>90</refresh_rate>"));
     }
 }

@@ -159,9 +159,14 @@ class RemoteSession(
     @Volatile
     private var extendWanted: VirtualDisplaySpec? = initialExtend
     val quality = MutableStateFlow(
-        (if (monitorMode) Preset.NATIVE else Preset.of(app.settings.value.preset)).quality(
-            VideoDecoder.decodable.firstOrNull { it in Codec.PRIORITY } ?: Codec.H264,
-        ).copy(drawCursor = monitorMode),
+        run {
+            val codec = VideoDecoder.decodable.firstOrNull { it in Codec.PRIORITY } ?: Codec.H264
+            if (monitorMode) {
+                Preset.NATIVE.qualityForFps(codec, initialExtend?.hz ?: 60).copy(drawCursor = true)
+            } else {
+                Preset.of(app.settings.value.preset).quality(codec)
+            }
+        },
     )
 
     private val _clipboard = MutableSharedFlow<String>(extraBufferCapacity = 4)
@@ -242,6 +247,7 @@ class RemoteSession(
     }
 
     fun start() {
+        decoder.setTargetFps(quality.value.fps)
         // 等的被控端上线了 / 与服务器重新连上了：叫醒等待中的连接线程
         scope.launch {
             client.hostOnline.collect { if (it == code) signal() }
@@ -686,7 +692,29 @@ class RemoteSession(
 
     fun setQuality(q: Quality) {
         quality.value = q
+        decoder.setTargetFps(q.fps)
         sendSettings()
+    }
+
+    /** 单独调整串流帧率（30 / 60 / 90 / 120 fps），保持当前清晰度并按比例调整码率上限 */
+    fun setFps(fps: Int) {
+        val cur = quality.value
+        val clamped = fps.coerceIn(1, 120)
+        val preset = Preset.matchClarity(cur)
+        val next = (preset?.qualityForFps(cur.codec, clamped) ?: cur.copy(fps = clamped)).copy(drawCursor = monitorMode)
+        setQuality(next)
+    }
+
+    /** 无线副屏切换刷新率（60 / 90 / 120 Hz）：同步更新虚拟显示器刷新率与串流帧率 */
+    fun setMonitorRefreshRate(hz: Int) {
+        val targetHz = hz.coerceIn(30, 120)
+        val nextSpec = extendSpec.value.copy(hz = targetHz)
+        if (monitorMode || extendState.value?.active == true) {
+            setExtend(nextSpec)
+        } else {
+            setExtendSpec(nextSpec)
+        }
+        setFps(targetHz)
     }
 
     /**

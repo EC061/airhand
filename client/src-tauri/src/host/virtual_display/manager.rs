@@ -141,7 +141,8 @@ fn run() {
                 busy = false;
                 failures = 0;
                 if facts.virtual_active && !mode_set {
-                    match topology::apply_mode(target_mode) {
+                    let can_bounce = extend_want.is_some() && bounced_spec != extend_want;
+                    match topology::apply_mode(target_mode, !can_bounce) {
                         Ok(true) => {
                             mode_set = true;
                             applied_mode = Some(target_mode);
@@ -152,8 +153,8 @@ fn run() {
                             if let Some(spec) = extend_want
                                 && bounced_spec != Some(spec)
                             {
-                                // MttVDD 驱动只在启动时读取 vdd_settings.xml：改分辨率不在列表里时重写配置并重启设备一次
-                                info!(?target_mode, "reloading virtual display driver for requested resolution: {e:#}");
+                                // MttVDD 驱动只在启动时读取 vdd_settings.xml：目标分辨率或刷新率不在列表里时重写配置并重启设备一次
+                                info!(?target_mode, "reloading virtual display driver for requested mode: {e:#}");
                                 bounced_spec = Some(spec);
                                 if let Err(we) = device::write_settings(target_mode) {
                                     warn!("{we:#}");

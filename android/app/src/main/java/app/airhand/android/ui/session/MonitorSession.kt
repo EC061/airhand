@@ -218,7 +218,7 @@ fun MonitorSession(
                         overflow = TextOverflow.Ellipsis,
                     )
                     val meta = buildList {
-                        add("${extendSpec.width}×${extendSpec.height}")
+                        add("${extendSpec.width}×${extendSpec.height} · ${extendSpec.hz} Hz")
                         encoder?.let { add(it.codec.label) }
                         stats?.let { st ->
                             add("${st.fps.roundToInt()} fps")
@@ -398,12 +398,12 @@ private fun MonitorSettingsSheet(
     val audioOn by session.audioOn.collectAsState()
     val settings by app.settings.flow.collectAsState()
     val dm = ctx.resources.displayMetrics
-    val nativeSpec = remember(dm.widthPixels, dm.heightPixels, spec.hidpi) {
-        VirtualDisplaySpec.matchScreen(dm.widthPixels, dm.heightPixels, hidpi = spec.hidpi)
+    val nativeSpec = remember(dm.widthPixels, dm.heightPixels, spec.hz, spec.hidpi) {
+        VirtualDisplaySpec.matchScreen(dm.widthPixels, dm.heightPixels, hz = spec.hz, hidpi = spec.hidpi)
     }
 
     fun pickSpec(next: VirtualDisplaySpec) {
-        session.setExtend(next.copy(hidpi = if (os == OsKind.MAC) spec.hidpi else false))
+        session.setExtend(next.copy(hz = spec.hz, hidpi = if (os == OsKind.MAC) spec.hidpi else false))
     }
 
     ModalBottomSheet(
@@ -427,7 +427,7 @@ private fun MonitorSettingsSheet(
                 Column(Modifier.weight(1f)) {
                     Text(stringResource(R.string.monitor_settings), style = MaterialTheme.typography.titleMedium)
                     Text(
-                        stringResource(R.string.extend_on, extendDisplay ?: "—", spec.width, spec.height),
+                        stringResource(R.string.extend_on_hz, extendDisplay ?: "—", spec.width, spec.height, spec.hz),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -475,6 +475,29 @@ private fun MonitorSettingsSheet(
                 }
             }
 
+            // 1.5 刷新率（Windows / Linux 虚拟显示器支持 60 / 90 / 120 Hz；macOS 私有接口仅支持 60 Hz）
+            if (os != OsKind.MAC) {
+                HorizontalDivider(Modifier.padding(vertical = 10.dp, horizontal = 16.dp))
+                Text(
+                    stringResource(R.string.extend_refresh_rate),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
+                )
+                FlowRow(
+                    Modifier.padding(horizontal = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    VirtualDisplaySpec.REFRESH_RATES.forEach { hz ->
+                        FilterChip(
+                            selected = spec.hz == hz && quality.fps == hz,
+                            onClick = { session.setMonitorRefreshRate(hz) },
+                            label = { Text(stringResource(R.string.hz_value, hz)) },
+                        )
+                    }
+                }
+            }
+
             // 2. 清晰度 / 画质
             HorizontalDivider(Modifier.padding(vertical = 10.dp, horizontal = 16.dp))
             Text(
@@ -483,12 +506,15 @@ private fun MonitorSettingsSheet(
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
             )
-            val currentPreset = Preset.match(quality)
+            val currentPreset = Preset.matchClarity(quality)
             Preset.entries.forEach { p ->
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clickable { session.setQuality(p.quality(quality.codec).copy(drawCursor = true)) }
+                        .clickable {
+                            val targetFps = if (p.fps >= 60) spec.hz else p.fps
+                            session.setQuality(p.qualityForFps(quality.codec, targetFps).copy(drawCursor = true))
+                        }
                         .padding(horizontal = 16.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {

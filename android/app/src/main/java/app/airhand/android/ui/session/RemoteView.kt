@@ -75,6 +75,7 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
 
     private var videoW = 0
     private var videoH = 0
+    private var targetFps = 60f
     private val content = RectF()
     private val density = resources.displayMetrics.density
 
@@ -188,8 +189,34 @@ class RemoteView(context: Context, private val host: Host) : FrameLayout(context
 
     // ───────────────────────────── 画面 ─────────────────────────────
 
+    /** 告知 SurfaceFlinger 期望的视频帧率，避免 120 Hz LTPO 平板在播放视频时自动降回 60 Hz */
+    fun setTargetFps(fps: Int) {
+        val next = fps.coerceIn(24, 120).toFloat()
+        if (targetFps == next) return
+        targetFps = next
+        applySurfaceFrameRate()
+    }
+
+    private fun applySurfaceFrameRate() {
+        val s = surface ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            runCatching {
+                s.setFrameRate(
+                    targetFps,
+                    Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                    Surface.CHANGE_FRAME_RATE_ALWAYS,
+                )
+            }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching {
+                s.setFrameRate(targetFps, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
+            }
+        }
+    }
+
     override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
         surface = Surface(st)
+        applySurfaceFrameRate()
         host.onSurface(surface)
     }
 

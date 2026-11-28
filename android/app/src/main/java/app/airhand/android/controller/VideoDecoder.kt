@@ -64,6 +64,8 @@ class VideoDecoder(
     private var surface: Surface? = null
     private var codec: MediaCodec? = null
     private var config: Triple<Codec, Int, Int>? = null
+    @Volatile
+    private var targetFps = 60
 
     /** 现在用的解码器（[onStats] 报的）和上次报的时刻（elapsedRealtime） */
     private var active: DecoderStats? = null
@@ -85,6 +87,11 @@ class VideoDecoder(
             askKeyframe(force = true)
             handler.postDelayed(renderWatchdog, 1000L)
         }
+    }
+
+    /** 告知解码器目标帧率（供高刷 90/120 fps 配置时钟与缓冲） */
+    fun setTargetFps(fps: Int) {
+        targetFps = fps.coerceIn(30, 120)
     }
 
     /** 开关改变、声音结束：重新计算等待时间，让画面及时恢复低延迟。 */
@@ -267,6 +274,8 @@ class VideoDecoder(
         val lowLatency = basic().apply {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             setInteger(MediaFormat.KEY_PRIORITY, 0)
+            setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
+            setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
             // 各家芯片自己的低延迟开关（不认识的键会被忽略），与 Moonlight 相同
             setInteger("vendor.qti-ext-dec-low-latency.enable", 1)
             setInteger("vendor.qti-ext-dec-picture-order.enable", 1)

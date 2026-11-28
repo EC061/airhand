@@ -322,12 +322,17 @@
     <string name="extend_off">Creates a wireless virtual second monitor on the remote computer while keeping its physical screen on, and switches this device to it. Automatically removed when you disconnect</string>
     <string name="extend_starting">Creating virtual second monitor…</string>
     <string name="extend_on">Active on %1$s (%2$d×%3$d). Drag windows from the remote desktop onto this screen</string>
+    <string name="extend_on_hz">Active on %1$s (%2$d×%3$d @ %4$d Hz). Drag windows from the remote desktop onto this screen</string>
     <string name="extend_failed">Couldn\'t start extended display (%1$s)</string>
     <string name="extend_unavailable_windows">Not available on the remote computer: Airhand needs to be installed for all users with the virtual display driver</string>
     <string name="extend_unavailable_mac">Not available on this Mac</string>
     <string name="extend_unavailable_linux">Not available on the remote Linux computer: no free X11 RandR output/CRTC was found</string>
     <string name="extend_not_allowed">The remote computer\'s settings don\'t allow extended virtual displays (extend_display in config.toml)</string>
     <string name="extend_resolution">Aspect ratio &amp; resolution</string>
+    <string name="extend_refresh_rate">Refresh rate</string>
+    <string name="quality_fps">Frame rate</string>
+    <string name="hz_value">%1$d Hz</string>
+    <string name="fps_value">%1$d fps</string>
     <string name="extend_match_screen">Match this screen (%1$d×%2$d)</string>
     <string name="extend_swap_orientation">Rotate 90°</string>
     <string name="extend_hidpi">HiDPI (Retina)</string>
