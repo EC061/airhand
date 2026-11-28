@@ -12,7 +12,11 @@
           "gstreamer1.0-plugins-good",
           "gstreamer1.0-plugins-bad"
         ],
-        "recommends": ["gstreamer1.0-libav"]
+        "recommends": [
+          "gstreamer1.0-libav",
+          "libavcodec60 | libavcodec61 | libavcodec62",
+          "intel-media-va-driver-non-free | intel-media-va-driver | mesa-va-drivers"
+        ]
       }
     }
   }

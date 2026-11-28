@@ -69,6 +69,14 @@ fn main() {
             for lib in pw.libs {
                 println!("cargo:rustc-link-lib={lib}");
             }
+            // Linux 硬件编码的 FFmpeg ABI 访问层（运行时 dlopen libavcodec，编译期不需要 FFmpeg 头文件）
+            let ff_abi = "src/host/encoder/linux/ffmpeg_abi.c";
+            println!("cargo:rerun-if-changed={ff_abi}");
+            cc::Build::new()
+                .std("gnu11")
+                .warnings(true)
+                .file(ff_abi)
+                .compile("airhand_ffmpeg_abi");
         }
         _ => {}
     }

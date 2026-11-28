@@ -1,7 +1,8 @@
 //! 视频编码。
 //!
 //! * **硬件编码**（优先）：Windows Media Foundation 硬件 MFT（NVENC / Quick Sync / AMF），
-//!   支持 H.264 / H.265 / AV1；macOS VideoToolbox，支持 H.264 / H.265。几乎不占用 CPU；
+//!   支持 H.264 / H.265 / AV1；macOS VideoToolbox，支持 H.264 / H.265；
+//!   Linux VA-API（Intel / AMD）与 NVENC（NVIDIA），支持 H.264 / H.265 / AV1。几乎不占用 CPU；
 //! * **软件编码**（兜底）：OpenH264 屏幕内容模式。
 //!
 //! 被控端只在画面变化时才编码，静止画面完全不占带宽。
@@ -12,8 +13,11 @@
 //!   `MFCreateDXGISurfaceBuffer` 直接交给硬件 MFT（见 mf.rs）；macOS 的 ScreenCaptureKit 采集时就按编码尺寸输出 NV12，
 //!   `CVPixelBuffer` 原样交给 VideoToolbox（见 vt.rs、`capture/sck.rs`）。省掉了读回、大块拷贝、CPU 缩放和色彩转换
 //!   （4K、Retina 屏上这些加起来每帧十几毫秒）；
-//! * **CPU 回退**：软件编码、Linux 或显卡不支持零拷贝时，读出 BGRA，按需缩放并转换成 YUV 4:2:0。
+//! * **CPU 回退**：软件编码、Linux（X11 采集在内存里，转换 NV12 后交给 VA-API / NVENC）或显卡不支持零拷贝时，
+//!   读出 BGRA，按需缩放并转换成 YUV 4:2:0。
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(windows)]
 mod mf;
 mod software;
@@ -26,7 +30,7 @@ use airhand_proto::session::{Codec, EncoderInfo, Notice, QualitySettings};
 use anyhow::{Context, Result, anyhow, bail};
 use fast_image_resize as fir;
 use tracing::info;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 use tracing::warn;
 
 use super::capture::{Frame, GpuFrame};
@@ -178,7 +182,7 @@ pub fn available_codecs() -> Vec<Codec> {
         .get_or_init(|| {
             #[allow(unused_mut)]
             let mut list = vec![Codec::H264];
-            #[cfg(any(windows, target_os = "macos"))]
+            #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
             for c in [Codec::H265, Codec::AV1] {
                 if has_hardware(c) {
                     list.push(c);
@@ -188,6 +192,12 @@ pub fn available_codecs() -> Vec<Codec> {
             list
         })
         .clone()
+}
+
+/// 后台预热硬件编码器探测（Linux 启动被控端时调用，避免首次连接等待探测）。
+#[cfg(target_os = "linux")]
+pub fn warm_up() {
+    linux::warm_up();
 }
 
 /// 会话开始时要告诉控制端的、和编码有关的情况：Windows 被标记成了 Windows To Go，因此一个硬件编码器也列不出来
@@ -231,6 +241,11 @@ fn has_hardware(codec: Codec) -> bool {
     vt::has_hardware(codec)
 }
 
+#[cfg(target_os = "linux")]
+fn has_hardware(codec: Codec) -> bool {
+    linux::has_hardware(codec)
+}
+
 #[cfg(windows)]
 fn hardware_encoder(
     codec: Codec,
@@ -251,6 +266,19 @@ fn hardware_encoder(
     gpu: Option<&GpuFrame>,
 ) -> Result<Box<dyn VideoEncoder>> {
     Ok(Box::new(vt::VtEncoder::new(codec, w, h, fps, kbps, gpu)?))
+}
+
+#[cfg(target_os = "linux")]
+fn hardware_encoder(
+    codec: Codec,
+    (w, h): (u32, u32),
+    fps: u8,
+    kbps: u32,
+    _gpu: Option<&GpuFrame>,
+) -> Result<Box<dyn VideoEncoder>> {
+    Ok(Box::new(linux::LinuxHwEncoder::new(
+        codec, w, h, fps, kbps,
+    )?))
 }
 
 /// 缩放 + 编码。持有可复用的缩放缓冲区。
@@ -291,7 +319,7 @@ impl Encoder {
         #[allow(unused_mut)]
         let mut inner: Option<Box<dyn VideoEncoder>> = None;
 
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
         if allow_hw {
             let mut order = vec![s.codec];
             if s.codec != Codec::H264 {
@@ -310,7 +338,7 @@ impl Encoder {
                 }
             }
         }
-        #[cfg(not(any(windows, target_os = "macos")))]
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         let _ = (allow_hw, gpu);
 
         let inner = match inner {
@@ -410,7 +438,7 @@ impl Encoder {
 }
 
 /// 在 Annex-B 码流中查找 NAL 类型（用于判断是否包含参数集 / 关键帧）。
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos", target_os = "linux")), allow(dead_code))]
 pub(crate) fn annexb_nal_types(data: &[u8], hevc: bool) -> impl Iterator<Item = u8> + '_ {
     let mut i = 0usize;
     std::iter::from_fn(move || {
@@ -522,7 +550,7 @@ mod tests {
         assert_eq!(check(Codec::H264, false).as_deref(), Some("OpenH264"));
     }
 
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     #[test]
     fn hardware_all() {
         for c in available_codecs() {
