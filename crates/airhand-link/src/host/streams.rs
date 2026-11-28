@@ -22,7 +22,7 @@ use airhand_proto::framing;
 use airhand_proto::handshake::{Confirm, PublicKey};
 use airhand_proto::session::{
     ControllerDatagram, ControllerMsg, DirectOffer, HostDatagram, InputEvent, MAX_CLIPBOARD_TEXT,
-    QualitySettings, StreamView,
+    QualitySettings, StreamView, VirtualDisplaySpec,
 };
 use airhand_proto::{MAX_STREAMS, SessionLane};
 use anyhow::{Context, Result, anyhow};
@@ -263,6 +263,7 @@ pub(crate) fn request(m: ControllerMsg) -> Option<Request> {
         ControllerMsg::Audio { enabled } => Request::Audio(enabled),
         ControllerMsg::Mic { enabled } => Request::Mic(enabled),
         ControllerMsg::Privacy { on } => Request::Privacy(on),
+        ControllerMsg::Extend { spec } => Request::Extend(spec.map(VirtualDisplaySpec::sanitized)),
         // 直连的回答交给直连任务，剪贴板里的文件交给 Files（都在读任务里）
         ControllerMsg::Direct(_) | ControllerMsg::Files(_) => return None,
     })
@@ -317,6 +318,8 @@ pub struct Admitted {
     pub view: Vec<StreamView>,
     /// 开始时要不要防窥模式（见 `airhand_proto::session` 的"防窥模式"）
     pub privacy: bool,
+    /// 开始时要不要扩展虚拟显示器（已经做过范围校验）
+    pub extend: Option<VirtualDisplaySpec>,
 }
 
 impl HostStreams {
@@ -359,6 +362,7 @@ impl HostStreams {
                 .take(MAX_STREAMS as usize)
                 .collect(),
             privacy: r.intro.privacy,
+            extend: r.intro.extend.map(VirtualDisplaySpec::sanitized),
         };
         info!(
             session_id,

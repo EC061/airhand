@@ -27,6 +27,7 @@ data class Quality(
     val maxShort: Int,
     val adaptive: Boolean = true,
     val codec: Codec = Codec.H264,
+    val drawCursor: Boolean = false,
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("fps", fps)
@@ -34,6 +35,7 @@ data class Quality(
         .put("maxShort", maxShort)
         .put("adaptive", adaptive)
         .put("codec", codec.wire)
+        .apply { if (drawCursor) put("drawCursor", true) }
 }
 
 /** 画质预设：与桌面控制台（client/src/lib/presets.ts）相同 */
@@ -47,10 +49,30 @@ enum class Preset(val id: String, val fps: Int, val kbps: Int, val maxShort: Int
     fun quality(codec: Codec) =
         Quality(fps, kbps, maxShort, true, codec)
 
+    /** 按目标帧率生成画质设置：高于预设帧率时按比例放宽码率上限（仍受自适应码率控制） */
+    fun qualityForFps(codec: Codec, targetFps: Int): Quality {
+        val chosenFps = targetFps.coerceIn(1, 120)
+        val scaledKbps = if (chosenFps > fps) {
+            ((kbps.toLong() * (fps + chosenFps)) / (2L * fps)).toInt().coerceAtMost(60_000)
+        } else {
+            kbps
+        }
+        return Quality(chosenFps, scaledKbps, maxShort, true, codec)
+    }
+
     companion object {
         val DEFAULT = BALANCED
         fun of(id: String?) = entries.firstOrNull { it.id == id } ?: DEFAULT
         fun match(q: Quality) = entries.firstOrNull { it.fps == q.fps && it.kbps == q.kbps && it.maxShort == q.maxShort }
+
+        /** 即使单独调整了帧率（如 90 / 120 fps），也识别当前对应的清晰度档位 */
+        fun matchClarity(q: Quality): Preset? = match(q) ?: when (q.maxShort) {
+            0 -> NATIVE
+            1440 -> HD
+            1080 -> if (q.fps >= 45 || q.kbps >= 6000) SMOOTH else BALANCED
+            720 -> SAVER
+            else -> null
+        }
     }
 }
 
@@ -243,6 +265,68 @@ enum class PrivacyState(val wire: String) {
     companion object {
         /** 不认识的（对方版本新增的；Rust 那边已经报成 unavailable，这里再保险一次）当作开不了 */
         fun fromWire(s: String?): PrivacyState = entries.firstOrNull { it.wire == s } ?: UNAVAILABLE
+    }
+}
+
+/** 扩展虚拟显示器（无线副屏）规格，与 Rust 的 `airhand_proto::session::VirtualDisplaySpec` 对应 */
+data class VirtualDisplaySpec(
+    val width: Int,
+    val height: Int,
+    val hz: Int = 60,
+    val hidpi: Boolean = false,
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("width", width)
+        .put("height", height)
+        .put("hz", hz)
+        .put("hidpi", hidpi)
+
+    fun swapped(): VirtualDisplaySpec = copy(width = height, height = width)
+
+    companion object {
+        val REFRESH_RATES = listOf(60, 90, 120)
+
+        /** 将设备上报的屏幕刷新率归档到支持的副屏刷新率档位（60 / 90 / 120 Hz） */
+        fun snapHz(rawHz: Float): Int = when {
+            rawHz >= 110f -> 120
+            rawHz >= 80f -> 90
+            else -> 60
+        }
+
+        /** 按本机屏幕宽高生成同比例的虚拟显示器规格（偶数像素，长边上限 2560 以兼顾清晰度与编解码性能） */
+        fun matchScreen(screenW: Int, screenH: Int, hz: Int = 60, hidpi: Boolean = false): VirtualDisplaySpec {
+            var w = screenW.coerceAtLeast(480).toDouble()
+            var h = screenH.coerceAtLeast(480).toDouble()
+            val maxSide = 2560.0
+            val longSide = maxOf(w, h)
+            if (longSide > maxSide) {
+                val scale = maxSide / longSide
+                w *= scale
+                h *= scale
+            }
+            val evenW = (w.toInt().coerceIn(480, 3840) and 1.inv()).coerceAtLeast(480)
+            val evenH = (h.toInt().coerceIn(480, 3840) and 1.inv()).coerceAtLeast(480)
+            return VirtualDisplaySpec(evenW, evenH, hz.coerceIn(30, 120), hidpi)
+        }
+    }
+}
+
+/**
+ * 被控端的扩展虚拟显示器（无线副屏）状态，与 Rust 的 `airhand_proto::session::ExtendState` 对应。
+ */
+enum class ExtendState(val wire: String) {
+    UNAVAILABLE("unavailable"),
+    NOT_ALLOWED("notAllowed"),
+    OFF("off"),
+    STARTING("starting"),
+    ON("on"),
+    FAILED("failed");
+
+    val active get() = this == ON || this == STARTING
+    val usable get() = this != UNAVAILABLE && this != NOT_ALLOWED
+
+    companion object {
+        fun fromWire(s: String?): ExtendState = entries.firstOrNull { it.wire == s } ?: UNAVAILABLE
     }
 }
 

@@ -47,6 +47,8 @@ pub(super) struct Facts {
 pub(super) struct Wants {
     /// 防窥模式
     pub privacy: bool,
+    /// 扩展虚拟显示器（无线副屏）：与本机显示器同时在桌面上
+    pub extend: bool,
     /// 有会话（或者最后一个会话刚结束不久）：要有显示器可看
     pub sessions: bool,
 }
@@ -64,6 +66,8 @@ pub(super) enum Step {
     Disable,
     /// 只留虚拟显示器在桌面上（防窥）
     Isolate,
+    /// 保留本机显示器，同时把虚拟显示器扩展到桌面上（无线副屏）
+    Extend,
     /// 按 Windows 记着的设置恢复本机的显示器（防窥结束）
     Restore,
     /// 补着屏：把拔掉了、还在桌面上的本机显示器撤下来，只留虚拟显示器（见模块说明）
@@ -136,8 +140,9 @@ impl Plan {
     pub fn step(&mut self, wants: Wants, f: &Facts, now: Instant) -> Step {
         if f.physical_stale && !f.physical_active {
             let since = *self.stale_since.get_or_insert(now);
-            // 刚看到拔掉：等它稳定下来（防窥、撤下过本机显示器的照常处理）
+            // 刚看到拔掉：等它稳定下来（防窥、扩展、撤下过本机显示器的照常处理）
             if !wants.privacy
+                && !wants.extend
                 && !self.isolated
                 && now.saturating_duration_since(since) < STALE_SETTLE
             {
@@ -179,6 +184,21 @@ impl Plan {
             } else {
                 Step::Restore
             };
+        }
+        if wants.extend {
+            self.headless = None;
+            self.probing = None;
+            self.plugged_since = None;
+            if !f.enabled {
+                return Step::Enable;
+            }
+            if !f.virtual_connected {
+                return Step::Wait;
+            }
+            if !f.virtual_active {
+                return Step::Extend;
+            }
+            return Step::Idle;
         }
         if !f.enabled {
             if let Some(until) = self.probing {
@@ -265,14 +285,22 @@ mod tests {
 
     const SESSION: Wants = Wants {
         privacy: false,
+        extend: false,
+        sessions: true,
+    };
+    const EXTEND: Wants = Wants {
+        privacy: false,
+        extend: true,
         sessions: true,
     };
     const PRIVACY: Wants = Wants {
         privacy: true,
+        extend: false,
         sessions: true,
     };
     const NOBODY: Wants = Wants {
         privacy: false,
+        extend: false,
         sessions: false,
     };
 
@@ -498,6 +526,46 @@ mod tests {
         assert_eq!(
             p.step(SESSION, &facts(false, false, false), t0),
             Step::Enable
+        );
+    }
+
+    /// 扩展虚拟显示器：启用 → 等它出来 → 没在桌面上的话扩展到桌面上；关掉后若本机显示器在桌面上则停用
+    #[test]
+    fn extend_enables_attaches_and_disables() {
+        let mut p = Plan::default();
+        let t0 = Instant::now();
+        assert_eq!(p.step(EXTEND, &facts(false, false, true), t0), Step::Enable);
+        let waiting = Facts {
+            enabled: true,
+            virtual_connected: false,
+            ..facts(true, false, true)
+        };
+        assert_eq!(p.step(EXTEND, &waiting, t0), Step::Wait);
+        // 设备已连接但 Windows 没把它放上桌面：显式扩展
+        assert_eq!(p.step(EXTEND, &facts(true, false, true), t0), Step::Extend);
+        // 已和本机显示器同时在桌面上：保持
+        assert_eq!(p.step(EXTEND, &facts(true, true, true), t0), Step::Idle);
+        // 打开防窥时防窥优先：隔离本机显示器
+        let both = Wants {
+            privacy: true,
+            extend: true,
+            sessions: true,
+        };
+        assert_eq!(p.step(both, &facts(true, true, true), t0), Step::Isolate);
+        p.isolated = true;
+        // 关闭防窥但仍要扩展：先停用并恢复本机显示器，恢复完再重新启用扩展
+        assert_eq!(p.step(EXTEND, &facts(true, true, false), t0), Step::Disable);
+        assert_eq!(
+            p.step(EXTEND, &facts(false, false, true), t0),
+            Step::Restore
+        );
+        p.isolated = false;
+        assert_eq!(p.step(EXTEND, &facts(false, false, true), t0), Step::Enable);
+        // 关闭扩展：本机显示器在桌面上，稳定后停用虚拟显示器
+        assert_eq!(p.step(SESSION, &facts(true, true, true), t0), Step::Idle);
+        assert_eq!(
+            p.step(SESSION, &facts(true, true, true), t0 + SETTLE),
+            Step::Disable
         );
     }
 }

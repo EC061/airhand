@@ -1,9 +1,11 @@
 package app.airhand.android.controller
 
 import app.airhand.android.core.Codec
+import app.airhand.android.core.ExtendState
 import app.airhand.android.core.PrivacyState
 import app.airhand.android.core.Quality
 import app.airhand.android.core.SystemAction
+import app.airhand.android.core.VirtualDisplaySpec
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -113,12 +115,13 @@ class ProtocolTest {
         assertSame(want["audio"], Commands.audio(3, true))
         assertSame(want["clipboard"], Commands.clipboard(3, "hi"))
         assertSame(want["privacy"], Commands.privacy(3, true))
+        assertSame(want["extend"], Commands.extend(3, VirtualDisplaySpec(1920, 1200, 60, false)))
         assertSame(want["disconnect"], Commands.disconnect(3))
         // Android 不用的：画面确认走 Native.ctlAck，剪贴板由自己同步，还不能把手机的麦克风交给对方，
         // 只看对方的一个显示器（同时看几个是 view），手机的剪贴板换成文字时不用撤回分享的文件（分享不是复制）
         assertEquals(
             setOf("ack", "clipboardSync", "clipboardCleared", "mic", "view"),
-            want.keys - setOf("input", "settings", "keyframe", "display", "audio", "clipboard", "privacy", "disconnect"),
+            want.keys - setOf("input", "settings", "keyframe", "display", "audio", "clipboard", "privacy", "extend", "disconnect"),
         )
     }
 
@@ -139,14 +142,35 @@ class ProtocolTest {
         )
     }
 
+    /** 会话事件 `extend` 的状态（Rust 的 `ExtendState`，camelCase）及屏幕比例匹配 */
+    @Test
+    fun extendStatesMatchRust() {
+        assertEquals(
+            listOf("unavailable", "notAllowed", "off", "starting", "on", "failed"),
+            ExtendState.entries.map { it.wire },
+        )
+        for (s in ExtendState.entries) assertEquals(s, ExtendState.fromWire(s.wire))
+        assertEquals(ExtendState.UNAVAILABLE, ExtendState.fromWire("somethingNew"))
+        assertEquals(ExtendState.UNAVAILABLE, ExtendState.fromWire(null))
+        assertEquals(listOf(ExtendState.STARTING, ExtendState.ON), ExtendState.entries.filter { it.active })
+        assertEquals(
+            listOf(ExtendState.OFF, ExtendState.STARTING, ExtendState.ON, ExtendState.FAILED),
+            ExtendState.entries.filter { it.usable },
+        )
+        assertEquals(VirtualDisplaySpec(2560, 1600), VirtualDisplaySpec.matchScreen(2560, 1600))
+        assertEquals(VirtualDisplaySpec(2560, 1600), VirtualDisplaySpec.matchScreen(3200, 2000))
+        assertEquals(VirtualDisplaySpec(1200, 1920), VirtualDisplaySpec(1920, 1200).swapped())
+    }
+
     /** connect：控制码加上连接选项（和桌面版、网页版一样的 ConnectOptions） */
     @Test
     fun connectOptionsMatchRust() {
         val want = fixture.getJSONObject("connectOptions")
         val resume = Resume.fromJson(want.getJSONArray("resume"))
-        val have = Commands.options(resume, Quality(60, 8000, 1080, true, Codec.H265), "ab".repeat(32), "482913", audio = true, privacy = true)
+        val ext = VirtualDisplaySpec(1920, 1200, 60, false)
+        val have = Commands.options(resume, Quality(60, 8000, 1080, true, Codec.H265), "ab".repeat(32), "482913", audio = true, privacy = true, extend = ext)
         assertSame(want, have)
-        val cmd = Commands.connect("123 456", resume, Quality(60, 8000, 1080, true, Codec.H265), "ab".repeat(32), "482913", audio = true, privacy = true)
+        val cmd = Commands.connect("123 456", resume, Quality(60, 8000, 1080, true, Codec.H265), "ab".repeat(32), "482913", audio = true, privacy = true, extend = ext)
         assertEquals("connect", cmd.getString("cmd"))
         assertEquals("123 456", cmd.getString("code"))
         assertSame(want, JSONObject(cmd.toString()).apply { remove("cmd"); remove("code") })

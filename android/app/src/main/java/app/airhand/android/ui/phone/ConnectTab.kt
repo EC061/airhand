@@ -26,6 +26,7 @@ import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.DevicesOther
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Monitor
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -36,6 +37,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
@@ -66,8 +68,10 @@ import app.airhand.android.AirhandApp
 import app.airhand.android.R
 import app.airhand.android.controller.RemoteSession
 import app.airhand.android.core.Code
+import app.airhand.android.core.OsKind
 import app.airhand.android.core.Problem
 import app.airhand.android.core.ServerState
+import app.airhand.android.core.VirtualDisplaySpec
 import app.airhand.android.data.SavedDevice
 import app.airhand.android.ui.CodeInput
 import app.airhand.android.ui.ConfirmDialog
@@ -78,6 +82,7 @@ import app.airhand.android.ui.OsAvatar
 import app.airhand.android.ui.SectionTitle
 import app.airhand.android.ui.ServerPill
 import app.airhand.android.ui.session.SessionActivity
+import app.airhand.android.ui.session.deviceMaxRefreshHz
 import app.airhand.android.ui.theme.Brand
 import kotlinx.coroutines.launch
 
@@ -103,10 +108,15 @@ fun ConnectTab(modifier: Modifier, snackbar: SnackbarHostState, onOpenSettings: 
     var errorCode by remember { mutableStateOf<String?>(null) }
     var serverDetails by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<SavedDevice?>(null) }
-    // 端到端握手要用户决定的失败（要配对码 / 对方的身份变了）：哪个控制码、什么问题
-    var askUser by remember { mutableStateOf<Pair<String, Problem>?>(null) }
+    // 端到端握手要用户决定的失败（要配对码 / 对方的身份变了）：哪个控制码、什么问题、是否无线副屏模式
+    var askUser by remember { mutableStateOf<Triple<String, Problem, Boolean>?>(null) }
     var deleting by remember { mutableStateOf<SavedDevice?>(null) }
     val clipHasText = rememberClipHasText()
+
+    fun nativeMonitorSpec(): VirtualDisplaySpec {
+        val dm = ctx.resources.displayMetrics
+        return VirtualDisplaySpec.matchScreen(dm.widthPixels, dm.heightPixels, hz = deviceMaxRefreshHz(ctx))
+    }
 
     // 第一次连接失败：在原地显示原因，会话作废
     LaunchedEffect(session, phase) {
@@ -114,14 +124,14 @@ fun ConnectTab(modifier: Modifier, snackbar: SnackbarHostState, onOpenSettings: 
         if (phase is RemoteSession.Phase.Failed) {
             error = Messages.problem(ctx, phase.reason)
             errorCode = s.code
-            if (phase.reason.needsPairing) askUser = s.code to phase.reason
+            if (phase.reason.needsPairing) askUser = Triple(s.code, phase.reason, s.monitorMode)
             app.endSession(s)
         }
         // 连上了：这台已经在“我的设备”里，输入框清空
         if (phase is RemoteSession.Phase.Live && Code.parse(code) == s.code) code = ""
     }
 
-    fun connect(c: String) {
+    fun connect(c: String, monitorMode: Boolean = false) {
         val parsed = Code.parse(c)
         if (parsed == null) {
             error = ctx.getString(R.string.problem_invalid_code)
@@ -130,10 +140,15 @@ fun ConnectTab(modifier: Modifier, snackbar: SnackbarHostState, onOpenSettings: 
         }
         // 已经在连这台了（连点两下、输入法重复提交）
         val cur = app.session.value
-        if (cur != null && cur.code == parsed && cur.phase.value !is RemoteSession.Phase.Failed && cur.phase.value !is RemoteSession.Phase.Closed) return
+        if (cur != null && cur.code == parsed && cur.monitorMode == monitorMode && cur.phase.value !is RemoteSession.Phase.Failed && cur.phase.value !is RemoteSession.Phase.Closed) return
         error = null
         errorCode = null
-        app.startSession(parsed, viewOnly = false)
+        app.startSession(
+            parsed,
+            viewOnly = monitorMode,
+            monitorMode = monitorMode,
+            initialExtend = if (monitorMode) nativeMonitorSpec() else null,
+        )
         focus.clearFocus()
     }
 
@@ -212,8 +227,17 @@ fun ConnectTab(modifier: Modifier, snackbar: SnackbarHostState, onOpenSettings: 
                             }
                         }
                         Spacer(Modifier.weight(1f))
+                        OutlinedButton(
+                            onClick = { connect(code, monitorMode = true) },
+                            enabled = code.length == 6 && busyCode == null,
+                        ) {
+                            Icon(Icons.Outlined.Monitor, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(stringResource(R.string.connect_second_monitor))
+                        }
+                        Spacer(Modifier.width(8.dp))
                         Button(
-                            onClick = { connect(code) },
+                            onClick = { connect(code, monitorMode = false) },
                             enabled = code.length == 6 && busyCode == null,
                         ) {
                             if (busyCode != null && busyCode == Code.parse(code)) {
@@ -236,6 +260,7 @@ fun ConnectTab(modifier: Modifier, snackbar: SnackbarHostState, onOpenSettings: 
                 ActiveSessionCard(
                     name = s.hostName.collectAsState().value.ifBlank { Code.format(s.code) },
                     os = s.hostOs.collectAsState().value,
+                    monitorMode = s.monitorMode,
                     onOpen = { ctx.startActivity(Intent(ctx, SessionActivity::class.java)) },
                     onDisconnect = { app.endSession(s) },
                 )
@@ -260,7 +285,15 @@ fun ConnectTab(modifier: Modifier, snackbar: SnackbarHostState, onOpenSettings: 
                 error = if (errorCode == d.code && code != d.code) error else null,
                 onClick = {
                     if (waitingCode == d.code || busyCode == d.code) return@DeviceRow
-                    connect(d.code)
+                    connect(d.code, monitorMode = false)
+                },
+                onMonitor = if (OsKind.of(d.hostOs).let { it != OsKind.ANDROID && it != OsKind.IOS }) {
+                    {
+                        if (waitingCode == d.code || busyCode == d.code) return@DeviceRow
+                        connect(d.code, monitorMode = true)
+                    }
+                } else {
+                    null
                 },
                 onCancel = { app.endSession() },
                 onRename = { renaming = d },
@@ -274,7 +307,7 @@ fun ConnectTab(modifier: Modifier, snackbar: SnackbarHostState, onOpenSettings: 
     }
 
     // 对方要配对码、或者对方的身份变了（用户确认是重装了之后重新配对）：输入对方托盘菜单里的配对码再连
-    askUser?.let { (c, p) ->
+    askUser?.let { (c, p, mon) ->
         val hint = stringResource(R.string.pairing_hint)
         EditTextDialog(
             title = stringResource(R.string.pairing_title),
@@ -289,7 +322,13 @@ fun ConnectTab(modifier: Modifier, snackbar: SnackbarHostState, onOpenSettings: 
                 askUser = null
                 error = null
                 errorCode = null
-                app.startSession(c, viewOnly = false, pairing = it.filter(Char::isDigit))
+                app.startSession(
+                    c,
+                    viewOnly = mon,
+                    pairing = it.filter(Char::isDigit),
+                    monitorMode = mon,
+                    initialExtend = if (mon) nativeMonitorSpec() else null,
+                )
             },
         )
     }
@@ -346,7 +385,7 @@ fun ConnectTab(modifier: Modifier, snackbar: SnackbarHostState, onOpenSettings: 
 }
 
 @Composable
-private fun ActiveSessionCard(name: String, os: String, onOpen: () -> Unit, onDisconnect: () -> Unit) {
+private fun ActiveSessionCard(name: String, os: String, monitorMode: Boolean, onOpen: () -> Unit, onDisconnect: () -> Unit) {
     Card(
         onClick = onOpen,
         modifier = Modifier
@@ -360,7 +399,10 @@ private fun ActiveSessionCard(name: String, os: String, onOpen: () -> Unit, onDi
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(stringResource(R.string.session_active), style = MaterialTheme.typography.bodySmall)
+                Text(
+                    stringResource(if (monitorMode) R.string.monitor_active else R.string.session_active),
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
             TextButton(onClick = onDisconnect) { Text(stringResource(R.string.disconnect)) }
         }
@@ -418,6 +460,7 @@ private fun DeviceRow(
     waiting: Boolean,
     error: String?,
     onClick: () -> Unit,
+    onMonitor: (() -> Unit)?,
     onCancel: () -> Unit,
     onRename: () -> Unit,
     onCopy: () -> Unit,
@@ -461,24 +504,42 @@ private fun DeviceRow(
                 CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
             }
             waiting -> TextButton(onClick = onCancel) { Text(stringResource(R.string.cancel)) }
-            else -> Box {
-                IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.more)) }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(
-                        text = { Text(stringResource(R.string.device_rename)) },
-                        leadingIcon = { Icon(Icons.Outlined.Edit, null) },
-                        onClick = { menu = false; onRename() },
-                    )
-                    DropdownMenuItem(
-                        text = { Text(stringResource(R.string.copy_code)) },
-                        leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
-                        onClick = { menu = false; onCopy() },
-                    )
-                    DropdownMenuItem(
-                        text = { Text(stringResource(R.string.delete)) },
-                        leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
-                        onClick = { menu = false; onDelete() },
-                    )
+            else -> Row(verticalAlignment = Alignment.CenterVertically) {
+                if (onMonitor != null) {
+                    IconButton(onClick = onMonitor) {
+                        Icon(
+                            Icons.Outlined.Monitor,
+                            stringResource(R.string.connect_second_monitor),
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+                Box {
+                    IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.more)) }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        if (onMonitor != null) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.connect_second_monitor)) },
+                                leadingIcon = { Icon(Icons.Outlined.Monitor, null) },
+                                onClick = { menu = false; onMonitor() },
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.device_rename)) },
+                            leadingIcon = { Icon(Icons.Outlined.Edit, null) },
+                            onClick = { menu = false; onRename() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.copy_code)) },
+                            leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
+                            onClick = { menu = false; onCopy() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.delete)) },
+                            leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
+                            onClick = { menu = false; onDelete() },
+                        )
+                    }
                 }
             }
         }

@@ -21,7 +21,8 @@ use airhand_link::host::{
 };
 use airhand_proto::MAX_STREAMS;
 use airhand_proto::session::{
-    DisplayInfo, HostHello, HostMsg, MicState, Notice, QualitySettings, StreamView, stricter_short,
+    DisplayInfo, ExtendState, HostHello, HostMsg, MicState, Notice, QualitySettings, StreamView,
+    VirtualDisplaySpec, stricter_short,
 };
 use anyhow::Result;
 use bytes::Bytes;
@@ -38,7 +39,7 @@ use super::input::InjectorThread;
 use super::mic::{self, MicInput, MicLease};
 use super::pipeline::{self, Pipeline};
 use super::power::{self, Awake};
-use super::virtual_display::{self, Lease, Privacy};
+use super::virtual_display::{self, ExtendStatus, Lease, Privacy};
 use crate::clipboard::{self, ClipSync};
 use crate::config;
 use airhand_link::controller::Clip;
@@ -228,15 +229,21 @@ struct Desktop {
     /// 缺少的系统权限（macOS），见 [`super::missing_permissions`]
     missing: (bool, bool),
     mic: Mic,
-    /// 虚拟显示器：补屏、防窥（见 [`virtual_display`]）
+    /// 虚拟显示器：补屏、防窥、扩展副屏（见 [`virtual_display`]）
     screens: Lease,
-    /// 防窥模式的状态变了、改过显示设置
+    /// 防窥模式、扩展虚拟显示器的状态变了、改过显示设置
     privacy_changes: watch::Receiver<Privacy>,
+    extend_changes: watch::Receiver<ExtendStatus>,
     display_changes: watch::Receiver<u64>,
-    /// 告诉过控制端的防窥状态（一样的不再发）
+    /// 告诉过控制端的防窥 / 扩展状态（一样的不再发）
     privacy_sent: Option<Privacy>,
+    extend_sent: Option<ExtendStatus>,
     /// 控制端在握手里要了防窥模式：确认了握手才打开（重放的握手消息不能让本机黑屏）
     privacy_at_start: bool,
+    /// 控制端在握手里要了扩展虚拟显示器：确认了握手才打开
+    extend_at_start: Option<VirtualDisplaySpec>,
+    /// 本会话请求开启/调整了扩展副屏，就绪后自动把第 0 路切换到这块副屏
+    extend_auto_switch: bool,
     /// 会话期间不熄屏、不睡眠
     _awake: Option<Awake>,
     /// macOS：远程控制期间暂停 AWDL（见 `crate::awdl`），控制端确认了握手才拿
@@ -301,6 +308,8 @@ enum Tick {
     MicCheck,
     /// 防窥模式的状态变了
     Privacy,
+    /// 扩展虚拟显示器的状态变了
+    Extend,
     /// 该看看是不是走 Wi-Fi、AWDL 开着了（macOS）
     Awdl,
 }
@@ -337,10 +346,14 @@ impl Desktop {
                 tick: ticker(MIC_CHECK),
             },
             privacy_changes: screens.privacy_changes(),
+            extend_changes: screens.extend_changes(),
             display_changes: screens.display_changes(),
             screens,
             privacy_sent: None,
+            extend_sent: None,
             privacy_at_start: false,
+            extend_at_start: None,
+            extend_auto_switch: false,
             _awake: None,
             #[cfg(target_os = "macos")]
             _wifi: None,
@@ -368,6 +381,87 @@ impl Desktop {
             detail: p.detail.clone(),
         })?;
         self.privacy_sent = Some(p);
+        Ok(())
+    }
+
+    /// 告诉控制端扩展虚拟显示器现在怎么样（和上次说的一样就不说了；这个平台不支持就不说）
+    fn send_extend(&mut self) -> Result<()> {
+        let Some(mut e) = self.screens.extend() else {
+            return Ok(());
+        };
+        // 控制端在握手 intro 里已经请求了扩展副屏（例如断线重连后 linger 已过），但要等 `confirmed()` 才真正提交；
+        // 在这之前先报告 Starting，避免控制端收到临时的 Off 后把自己的重连期望清掉
+        if self.extend_at_start.is_some()
+            && matches!(e.state, ExtendState::Off | ExtendState::Failed)
+        {
+            e.state = ExtendState::Starting;
+            e.display = None;
+            e.detail = None;
+        }
+        if self.extend_sent.as_ref() == Some(&e) {
+            return Ok(());
+        }
+        self.out.send(&HostMsg::Extend {
+            state: e.state,
+            display: e.display.clone(),
+            detail: e.detail.clone(),
+        })?;
+        self.extend_sent = Some(e);
+        Ok(())
+    }
+
+    /// 本会话请求开启/调整了扩展副屏后，当它出现在显示器列表中时自动将第 0 路切换到这块副屏
+    async fn maybe_switch_to_extend(&mut self) -> Result<()> {
+        if !self.extend_auto_switch {
+            return Ok(());
+        }
+        let Some(status) = self.screens.extend() else {
+            self.extend_auto_switch = false;
+            return Ok(());
+        };
+        if status.state != ExtendState::On {
+            if matches!(
+                status.state,
+                ExtendState::Failed | ExtendState::Unavailable | ExtendState::NotAllowed
+            ) {
+                self.extend_auto_switch = false;
+            }
+            return Ok(());
+        }
+        let Some(target_name) = status.display else {
+            return Ok(());
+        };
+        if !self.displays.iter().any(|d| d.name == target_name) {
+            let now = tokio::task::spawn_blocking(capture::displays)
+                .await
+                .unwrap_or_default();
+            if !now.is_empty() && now != self.displays {
+                self.displays = now;
+            }
+        }
+        let Some(idx) = self.displays.iter().position(|d| d.name == target_name) else {
+            return Ok(());
+        };
+        let target = idx as u8;
+        let max_short = self.view.first().map_or(0, |v| v.max_short);
+        let mut requested = vec![StreamView {
+            display: target,
+            max_short,
+        }];
+        for v in self.view.iter().skip(1) {
+            if v.display != target {
+                requested.push(*v);
+            }
+        }
+        let next = resolve_view(&requested, self.displays.len(), MAX_STREAMS);
+        self.extend_auto_switch = false;
+        let moved = self.apply_view(next).await;
+        if moved {
+            self.out.send(&self.displays_msg())?;
+        } else if let Some(Some(p)) = self.pipelines.first() {
+            // 已经在看这块副屏（例如副屏刚改完分辨率）：马上补一个关键帧
+            p.request_keyframe(None);
+        }
         Ok(())
     }
 
@@ -530,6 +624,7 @@ impl Platform for Desktop {
         // macOS 的防窥采集的还是本机的显示器（调黑了，见 virtual_display），睡着的采集不了，照样叫
         self._awake = Some(power::keep_awake());
         self.privacy_at_start = start.privacy;
+        self.extend_at_start = start.extend;
         let dark = start.privacy && cfg!(windows);
         if !dark {
             power::wake_display();
@@ -560,7 +655,12 @@ impl Platform for Desktop {
             displays = wait_for_displays(WAKE_WAIT).await;
         }
         self.displays = displays;
-        let view = resolve_view(&start.view, self.displays.len(), MAX_STREAMS);
+        // 若控制端在握手里直接请求了扩展副屏（无线副屏模式），先不采集主显示器画面：等确认握手并建好副屏后再直接采集副屏
+        let view = if start.extend.is_some() {
+            Vec::new()
+        } else {
+            resolve_view(&start.view, self.displays.len(), MAX_STREAMS)
+        };
         let (hostname, os) = crate::sysinfo::host_identity();
         info!(
             session_id = self.session_id,
@@ -607,11 +707,12 @@ impl Platform for Desktop {
         let status = mic::probe(self.session_id).await;
         self.send_mic(status)?;
         self.send_privacy()?;
+        self.send_extend()?;
         Ok(())
     }
 
     /// 控制端确认了握手：是真的在连（重放的握手消息走不到这里），这时才在托盘里显示它、
-    /// 打开它在握手里要的防窥模式（断线重连时接着开着，见 [`virtual_display`]）
+    /// 打开它在握手里要的防窥模式 / 扩展副屏（断线重连时接着开着，见 [`virtual_display`]）
     fn confirmed(&mut self) {
         if let Some((gate, ip, admitted)) = self.identity.take() {
             gate.admitted(self.session_id, ip, &admitted);
@@ -619,6 +720,12 @@ impl Platform for Desktop {
         self.presence.confirmed(self.session_id);
         if self.privacy_at_start {
             self.screens.set_privacy(true);
+        }
+        if let Some(spec) = self.extend_at_start.take() {
+            self.extend_auto_switch = true;
+            self.screens.set_extend(Some(spec));
+            // 即使副屏已在 linger 期间处于 On（watch 值未变），也立即唤醒 Tick::Extend 切到副屏
+            self.extend_changes.mark_changed();
         }
         #[cfg(target_os = "macos")]
         {
@@ -654,6 +761,7 @@ impl Platform for Desktop {
                 }
             }
             Request::View(view) => {
+                self.extend_auto_switch = false;
                 let view = resolve_view(&view, self.displays.len(), MAX_STREAMS);
                 if view != self.view && self.apply_view(view).await {
                     self.out.send(&self.displays_msg())?;
@@ -674,6 +782,13 @@ impl Platform for Desktop {
                 // 它结束了才会退出防窥（见 ending）
                 self.presence.confirmed(self.session_id);
                 self.screens.set_privacy(on);
+            }
+            Request::Extend(spec) => {
+                self.presence.confirmed(self.session_id);
+                self.extend_auto_switch = spec.is_some();
+                self.screens.set_extend(spec);
+                self.send_extend()?;
+                self.maybe_switch_to_extend().await?;
             }
             Request::Mic(enabled) => {
                 self.mic.wanted = enabled;
@@ -702,6 +817,7 @@ impl Platform for Desktop {
             _ = self.mic.owner.changed(), if self.mic.waiting() => Tick::MicCheck,
             _ = self.mic.tick.tick(), if self.mic.missing() => Tick::MicCheck,
             _ = self.privacy_changes.changed() => Tick::Privacy,
+            _ = self.extend_changes.changed() => Tick::Extend,
             // 虚拟显示器改了显示设置：马上重新列出显示器，不等定时检查
             _ = self.display_changes.changed() => Tick::Displays,
             () = awdl_due(&mut self.awdl_tick) => Tick::Awdl,
@@ -762,7 +878,32 @@ impl Platform for Desktop {
                 .unwrap_or_default();
                 // 列不出来（例如切换显示模式的瞬间）时保留原来的列表
                 if !now.is_empty() && now != self.displays {
-                    let next = follow_view(&self.displays, &self.view, &now, fill_in.as_deref());
+                    let mut next = if self.extend_auto_switch && self.view.is_empty() {
+                        // 无线副屏模式正在等待副屏就绪：不要在等待间隙把主显示器画面推给控制端
+                        Vec::new()
+                    } else {
+                        follow_view(&self.displays, &self.view, &now, fill_in.as_deref())
+                    };
+                    if self.extend_auto_switch
+                        && let Some(status) = self.screens.extend()
+                        && status.state == ExtendState::On
+                        && let Some(target_name) = status.display
+                        && let Some(idx) = now.iter().position(|d| d.name == target_name)
+                    {
+                        let target = idx as u8;
+                        let max_short = self.view.first().map_or(0, |v| v.max_short);
+                        let mut requested = vec![StreamView {
+                            display: target,
+                            max_short,
+                        }];
+                        for v in next.iter().skip(1) {
+                            if v.display != target {
+                                requested.push(*v);
+                            }
+                        }
+                        next = resolve_view(&requested, now.len(), MAX_STREAMS);
+                        self.extend_auto_switch = false;
+                    }
                     info!(session_id, ?now, view = ?next, "displays changed");
                     self.displays = now;
                     // 序号没变的那几路接着编：采集线程自己会重新打开（旋转、改分辨率……）
@@ -773,6 +914,10 @@ impl Platform for Desktop {
             }
             Tick::Mic(status) => self.send_mic(status)?,
             Tick::Privacy => self.send_privacy()?,
+            Tick::Extend => {
+                self.send_extend()?;
+                self.maybe_switch_to_extend().await?;
+            }
             // 插上 / 拔掉网线、暂停 / 恢复了 AWDL：提示控制端，或者撤下提示
             Tick::Awdl => {
                 let active = tokio::task::spawn_blocking(super::awdl_hint)

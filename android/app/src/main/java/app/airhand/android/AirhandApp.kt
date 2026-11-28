@@ -70,13 +70,32 @@ class AirhandApp : Application() {
 
     /**
      * 连接一台设备（之前的会话会先关掉）。`pairing`：用户输入的配对码（对方要求配对，或者对方的身份变了、
-     * 要重新配对：配对码认的就是对方，连上之后记下对方现在的公钥）
+     * 要重新配对：配对码认的就是对方，连上之后记下对方现在的公钥）；`monitorMode`：无线副屏模式（不进远程控制、
+     * 不显示虚拟鼠标，直接建立并显示扩展虚拟显示器）
      */
-    fun startSession(code: String, viewOnly: Boolean, pairing: String? = null): RemoteSession {
-        android.util.Log.i("airhand", "connecting to $code${if (viewOnly) " (view only)" else ""}")
+    fun startSession(
+        code: String,
+        viewOnly: Boolean,
+        pairing: String? = null,
+        monitorMode: Boolean = false,
+        initialExtend: app.airhand.android.core.VirtualDisplaySpec? = null,
+    ): RemoteSession {
+        android.util.Log.i(
+            "airhand",
+            "connecting to $code${if (monitorMode) " (second monitor)" else if (viewOnly) " (view only)" else ""}",
+        )
         _session.value?.close()
         val saved = devices.get(code)
-        val s = RemoteSession(this, code, saved?.resume, viewOnly, saved?.hostKey, pairing)
+        val s = RemoteSession(
+            this,
+            code,
+            saved?.resume,
+            viewOnly = viewOnly || monitorMode,
+            hostKey = saved?.hostKey,
+            pairing = pairing,
+            monitorMode = monitorMode,
+            initialExtend = initialExtend,
+        )
         _session.value = s
         s.start()
         return s

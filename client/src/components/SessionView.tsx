@@ -1,6 +1,6 @@
 import { type ReactNode, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { closeTab, fmtCode, toggleFullscreen } from "../lib/actions";
-import { api, MOUSE_MODES, type MouseMode, type Platform } from "../lib/api";
+import { api, MOUSE_MODES, type MouseMode, type Platform, type VirtualDisplaySpec } from "../lib/api";
 import { type MsgKey, t, useT } from "../lib/i18n";
 import { LocalFiles } from "../lib/files";
 import { errorText, noticeText, problemText, sessionStateText } from "../lib/messages";
@@ -295,9 +295,13 @@ export function SessionView({ s }: { s: RemoteSession }) {
         </div>
 
         <div className="tb-right">
-          {s.displays.length > 1 && (
+          {(s.displays.length > 1 || s.extendState != null) && (
             <div className="menu-anchor">
-              <button className="tb-btn" onClick={() => toggleMenu("display")} title={t("session.switchDisplay")}>
+              <button
+                className={`tb-btn ${s.extendState === "on" || s.extendState === "starting" ? "on" : ""}`}
+                onClick={() => toggleMenu("display")}
+                title={t("session.switchDisplay")}
+              >
                 <IconMonitor size={17} />
                 <span>
                   {showingAll ? t("session.allDisplays") : t("session.display", { n: s.currentDisplay + 1 })}
@@ -378,6 +382,7 @@ export function SessionView({ s }: { s: RemoteSession }) {
                       <div className="dd-foot muted small">{t("session.popOutHint")}</div>
                     </>
                   )}
+                  {s.extendState != null && <ExtendDisplaySection s={s} />}
                 </Dropdown>
               )}
             </div>
@@ -916,6 +921,86 @@ function SwitcherItem({ s, active, onPick }: { s: RemoteSession; active: boolean
       </span>
       <span className="muted small">{s.state === "live" ? fmtCode(s.code) : sessionStateText(s)}</span>
     </button>
+  );
+}
+
+const EXTEND_PRESETS: { label: string; spec: VirtualDisplaySpec }[] = [
+  { label: "16:10 · 1920×1200", spec: { width: 1920, height: 1200, hz: 60, hidpi: false } },
+  { label: "16:10 · 2560×1600", spec: { width: 2560, height: 1600, hz: 60, hidpi: false } },
+  { label: "16:9 · 1920×1080", spec: { width: 1920, height: 1080, hz: 60, hidpi: false } },
+  { label: "16:9 · 2560×1440", spec: { width: 2560, height: 1440, hz: 60, hidpi: false } },
+  { label: "4:3 · 1600×1200", spec: { width: 1600, height: 1200, hz: 60, hidpi: false } },
+  { label: "3:2 · 1920×1280", spec: { width: 1920, height: 1280, hz: 60, hidpi: false } },
+];
+
+function ExtendDisplaySection({ s }: { s: RemoteSession }) {
+  const st = s.extendState;
+  if (!st) return null;
+  const active = st === "on" || st === "starting";
+  const usable = st !== "unavailable" && st !== "notAllowed";
+  const hint =
+    st === "unavailable"
+      ? s.hostPlatform === "mac"
+        ? t("extend.unavailableMac")
+        : s.hostPlatform === "linux"
+          ? t("extend.unavailableLinux")
+          : t("extend.unavailableWindows")
+      : st === "notAllowed"
+        ? t("extend.notAllowed")
+        : st === "starting"
+          ? t("extend.starting")
+          : st === "on"
+            ? t("extend.on", { display: s.extendDisplay ?? "—", w: s.extendSpec.width, h: s.extendSpec.height })
+            : st === "failed"
+              ? t("extend.failed", { detail: s.extendDetail ?? "—" })
+              : t("extend.off");
+  const pick = (spec: VirtualDisplaySpec) => {
+    const next = { ...spec, hidpi: s.hostPlatform === "mac" ? s.extendSpec.hidpi : false };
+    s.setExtendSpec(next);
+    s.focus();
+  };
+  return (
+    <>
+      <div className="dd-sep" />
+      <label className="dd-item toggle">
+        <span>
+          {t("extend.toggle")}
+          <span className={`muted small block ${st === "failed" ? "err" : ""}`}>{hint}</span>
+        </span>
+        <input
+          type="checkbox"
+          className="switch"
+          disabled={!usable}
+          checked={active}
+          onChange={(e) => {
+            s.setExtend(e.target.checked ? s.extendSpec : null);
+            s.focus();
+          }}
+        />
+      </label>
+      {usable && (
+        <>
+          <div className="dd-foot muted small">{t("extend.resolution")}</div>
+          {EXTEND_PRESETS.map((p) => {
+            const same = s.extendSpec.width === p.spec.width && s.extendSpec.height === p.spec.height;
+            return (
+              <button key={p.label} className={`dd-item ${same ? "active" : ""}`} onClick={() => pick(p.spec)}>
+                <span>{p.label}</span>
+              </button>
+            );
+          })}
+          <button
+            className="dd-item"
+            onClick={() => pick({ ...s.extendSpec, width: s.extendSpec.height, height: s.extendSpec.width })}
+          >
+            <span>{t("extend.swapOrientation")}</span>
+            <span className="muted small">
+              {s.extendSpec.height}×{s.extendSpec.width}
+            </span>
+          </button>
+        </>
+      )}
+    </>
   );
 }
 

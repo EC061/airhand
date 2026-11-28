@@ -297,6 +297,7 @@
     <string name="hide_keyboard">Hide keyboard</string>
     <string name="display_n">Display %1$d</string>
     <string name="display_primary">main</string>
+    <string name="display_extended">extended</string>
     <string name="clipboard_send">Send to the remote clipboard</string>
     <string name="clipboard_send_desc">Sends the text you copied so it can be pasted there</string>
     <string name="clipboard_sent">Sent to the remote clipboard</string>
@@ -315,6 +316,26 @@
     <string name="privacy_unavailable_mac">Not available on the remote Mac: someone at that Mac has to allow Airhand in System Settings → Privacy &amp; Security → Accessibility first (it\'s needed to block its keyboard and mouse)</string>
     <string name="privacy_not_allowed">The remote computer\'s settings don\'t allow privacy mode (privacy_mode in config.toml)</string>
     <string name="privacy_note">Someone at the remote computer can end privacy mode by disconnecting it from the network or restarting it</string>
+
+    <!-- Extended virtual display (wireless second monitor) -->
+    <string name="extend_toggle">Extended display (second monitor)</string>
+    <string name="extend_off">Creates a wireless virtual second monitor on the remote computer while keeping its physical screen on, and switches this device to it. Automatically removed when you disconnect</string>
+    <string name="extend_starting">Creating virtual second monitor…</string>
+    <string name="extend_on">Active on %1$s (%2$d×%3$d). Drag windows from the remote desktop onto this screen</string>
+    <string name="extend_on_hz">Active on %1$s (%2$d×%3$d @ %4$d Hz). Drag windows from the remote desktop onto this screen</string>
+    <string name="extend_failed">Couldn\'t start extended display (%1$s)</string>
+    <string name="extend_unavailable_windows">Not available on the remote computer: Airhand needs to be installed for all users with the virtual display driver</string>
+    <string name="extend_unavailable_mac">Not available on this Mac</string>
+    <string name="extend_unavailable_linux">Not available on the remote Linux computer: no free X11 RandR output/CRTC was found</string>
+    <string name="extend_not_allowed">The remote computer\'s settings don\'t allow extended virtual displays (extend_display in config.toml)</string>
+    <string name="extend_resolution">Aspect ratio &amp; resolution</string>
+    <string name="extend_refresh_rate">Refresh rate</string>
+    <string name="quality_fps">Frame rate</string>
+    <string name="hz_value">%1$d Hz</string>
+    <string name="fps_value">%1$d fps</string>
+    <string name="extend_match_screen">Match this screen (%1$d×%2$d)</string>
+    <string name="extend_swap_orientation">Rotate 90°</string>
+    <string name="extend_hidpi">HiDPI (Retina)</string>
 
     <!-- Game keys: buttons and a joystick over the picture when controlling a computer -->
     <string name="game_show">Show on the screen</string>
@@ -523,4 +544,15 @@
     <string name="tv_scale_fit">Fit</string>
     <string name="tv_scale_fill">Fill (crop edges)</string>
     <string name="tv_scale_stretch">Stretch</string>
+
+    <!-- Second monitor mode -->
+    <string name="connect_second_monitor">Second monitor</string>
+    <string name="monitor_active">Second monitor · tap to return</string>
+    <string name="monitor_settings">Monitor settings</string>
+    <string name="monitor_display_options">Display &amp; audio</string>
+    <string name="monitor_setting_up">Setting up second monitor (%1$d×%2$d)…</string>
+    <string name="monitor_setting_up_hint">Waiting for the remote computer to attach the virtual display and draw its first frame</string>
+    <string name="monitor_unavailable_title">Second monitor unavailable</string>
+    <string name="monitor_stopped">The extended virtual display was turned off on the remote computer</string>
+    <string name="monitor_disconnect_text">Disconnect this second monitor from “%1$s” and remove the virtual display?</string>
 </resources>

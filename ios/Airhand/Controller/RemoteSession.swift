@@ -60,6 +60,11 @@ final class RemoteSession {
     private(set) var privacyState: PrivacyState?
     /// 没能打开防窥的原因（英文技术信息，对方给的）
     private(set) var privacyDetail: String?
+    /// 扩展虚拟显示器（无线副屏）状态
+    private(set) var extendState: ExtendState?
+    private(set) var extendDisplay: String?
+    private(set) var extendDetail: String?
+    var extendSpec = VirtualDisplaySpec(width: 1920, height: 1200)
     /// 远端光标（UIKit 的画面直接观察，不经过 SwiftUI）
     @ObservationIgnored var onCursor: ((CursorState) -> Void)?
     @ObservationIgnored var onPhase: ((Phase) -> Void)?
@@ -101,6 +106,8 @@ final class RemoteSession {
     @ObservationIgnored private var sentAudio = false
     /// 要防窥模式（开关）：重连时在连接选项里带上，对方就一直保持着。跟着对方说的状态变。只在主线程上用
     @ObservationIgnored private var privacyWanted = false
+    /// 要扩展虚拟显示器：重连时在连接选项里带上。只在主线程上用
+    @ObservationIgnored private var extendWanted: VirtualDisplaySpec? = nil
     @ObservationIgnored private var zoomShown: CGSize?
     @ObservationIgnored private var zoomWanted: CGSize?
     @ObservationIgnored private var zoomWork: DispatchWorkItem?
@@ -187,14 +194,14 @@ final class RemoteSession {
             }
             if closed { break }
             let h = client.handle
-            // 画质、显示器、防窥这些状态都在主线程上改：在主线程上读
-            let (settings, privacy) = DispatchQueue.main.sync { (currentSettings(), privacyWanted) }
+            // 画质、显示器、防窥、扩展副屏这些状态都在主线程上改：在主线程上读
+            let (settings, privacy, extend) = DispatchQueue.main.sync { (currentSettings(), privacyWanted, extendWanted) }
             sentSettings = settings
             let withAudio = audioOn && !background
             sentAudio = withAudio
-            // 防窥模式也在握手里就说：断线重连时对方一直保持着，它的屏幕不会在重连的间隙露出来
+            // 防窥模式、扩展副屏也在握手里就说：断线重连时对方保持原状态
             let cmd = Commands.connect(code: code, resume: resume, settings: settings, hostKey: hostKey, pairing: pairing, audio: withAudio,
-                                       privacy: privacy)
+                                       privacy: privacy, extend: extend)
             let r = Json.parse(Native.ctlCall(h, Json.string(cmd))) ?? ["err": ["kind": "failed", "detail": "bad reply"]]
             if closed {
                 if let ok = r.obj("ok"), let s = ok.int("sid") { _ = Native.ctlCall(h, Json.string(Commands.disconnect(UInt32(s)))) }
@@ -205,10 +212,13 @@ final class RemoteSession {
                 onConnected(h, ok, UInt32(s))
                 guard let end = pump(h, UInt32(s)) else { break }
                 sid = -1
-                // 对方还没重新说它的防窥模式（要不要开着留着，重连时告诉它）
+                // 对方还没重新说它的防窥模式和扩展副屏（要不要开着留着，重连时告诉它）
                 main {
                     self.privacyState = nil
                     self.privacyDetail = nil
+                    self.extendState = nil
+                    self.extendDisplay = nil
+                    self.extendDetail = nil
                 }
                 decoder.resetStream()
                 stopAudio()
@@ -283,9 +293,12 @@ final class RemoteSession {
             if !self.grantOs.isEmpty { self.hostOs = self.grantOs }
             self.micState = nil
             self.micOn = false
-            // 防窥模式：对方在 Hello 之后重新说（要不要开着已经在握手里告诉它了）
+            // 防窥模式、扩展副屏：对方在 Hello 之后重新说（要不要开着已经在握手里告诉它了）
             self.privacyState = nil
             self.privacyDetail = nil
+            self.extendState = nil
+            self.extendDisplay = nil
+            self.extendDetail = nil
         }
         if audioOn && !background { startAudio(tell: !sentAudio) } else if sentAudio { command { Commands.audio($0, false) } }
         if background { applyBackground() }
@@ -461,6 +474,19 @@ final class RemoteSession {
                 self.privacyDetail = detail
                 // 没能打开（Windows 换虚拟显示器要几秒，用户可能已经关了菜单）：提示一下
                 if state == .failed, was != .failed { self.app?.show(L.t("privacy_failed", detail ?? "—")) }
+            }
+        case "extend":
+            let state = ExtendState.fromWire(e.str("state"))
+            let display = e.str("display")
+            let detail = e.str("detail")
+            main {
+                let was = self.extendState
+                // 与防窥模式一致，跟着对方说的变：开启 / 启动中记着当前规格供断线重连携带
+                self.extendWanted = state.active ? self.extendSpec : nil
+                self.extendState = state
+                self.extendDisplay = display
+                self.extendDetail = detail
+                if state == .failed, was != .failed { self.app?.show(L.t("extend_failed", detail ?? "—")) }
             }
         default: break
         }
@@ -672,6 +698,19 @@ final class RemoteSession {
         command { Commands.privacy($0, on) }
         privacyDetail = nil
         privacyState = on ? .starting : .off
+    }
+
+    /// 开启 / 调整 / 关闭对方的扩展虚拟显示器（无线副屏）
+    func setExtend(_ spec: VirtualDisplaySpec?) {
+        guard !viewOnly else { return }
+        if let s = extendState, !s.usable { return }
+        if let spec { extendSpec = spec }
+        extendWanted = spec
+        guard extendState != nil, handle != 0, sid >= 0, !closed else { return }
+        command { Commands.extend($0, spec) }
+        extendDetail = nil
+        if spec == nil { extendDisplay = nil }
+        extendState = spec != nil ? .starting : .off
     }
 
     // ── 其他 ──

@@ -66,6 +66,16 @@ export const contract = {
       "sid": 3
     },
     {
+      "cmd": "extend",
+      "sid": 3,
+      "spec": {
+        "height": 1200,
+        "hidpi": false,
+        "hz": 60,
+        "width": 1920
+      }
+    },
+    {
       "cmd": "clipboard",
       "sid": 3,
       "text": "hi"
@@ -91,6 +101,12 @@ export const contract = {
   ],
   "connectOptions": {
     "audio": true,
+    "extend": {
+      "height": 1200,
+      "hidpi": false,
+      "hz": 60,
+      "width": 1920
+    },
     "hostKey": "abababababababababababababababababababababababababababababababab",
     "pairing": "482913",
     "privacy": true,

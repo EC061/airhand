@@ -74,11 +74,13 @@ enum Media {
 enum Commands {
     private static func cmd(_ name: String, _ sid: UInt32) -> JSON { ["cmd": name, "sid": sid] }
 
-    /// `privacy`：要不要防窥模式（重连时带上现在的开关，对方一开始就保持着，它的屏幕不会在重连的间隙露出来）
+    /// `privacy` / `extend`：重连时带上防窥与扩展副屏状态，对方断线重连后保持原样
     static func connect(code: String, resume: String?, settings: Quality, hostKey: String?, pairing: String?, audio: Bool,
-                        privacy: Bool = false) -> JSON {
-        ["cmd": "connect", "code": code, "resume": Resume.toJson(resume), "hostKey": hostKey ?? NSNull(),
-         "pairing": pairing ?? NSNull(), "settings": settings.json, "audio": audio, "privacy": privacy]
+                        privacy: Bool = false, extend: VirtualDisplaySpec? = nil) -> JSON {
+        var j: JSON = ["cmd": "connect", "code": code, "resume": Resume.toJson(resume), "hostKey": hostKey ?? NSNull(),
+                       "pairing": pairing ?? NSNull(), "settings": settings.json, "audio": audio, "privacy": privacy]
+        if let extend { j["extend"] = extend.json }
+        return j
     }
 
     static func input(_ sid: UInt32, _ events: [JSON]) -> JSON { var c = cmd("input", sid); c["events"] = events; return c }
@@ -89,6 +91,12 @@ enum Commands {
     static func mic(_ sid: UInt32, _ on: Bool) -> JSON { var c = cmd("mic", sid); c["enabled"] = on; return c }
     /// 打开 / 关闭对方的防窥模式（对方说过它的状态之后才有用，见 `RemoteSession.setPrivacy`）
     static func privacy(_ sid: UInt32, _ on: Bool) -> JSON { var c = cmd("privacy", sid); c["on"] = on; return c }
+    /// 开启 / 调整 / 关闭对方的扩展虚拟显示器（无线副屏；spec 为 nil 时关闭）
+    static func extend(_ sid: UInt32, _ spec: VirtualDisplaySpec?) -> JSON {
+        var c = cmd("extend", sid)
+        c["spec"] = spec?.json ?? NSNull()
+        return c
+    }
     static func clipboard(_ sid: UInt32, _ text: String) -> JSON { var c = cmd("clipboard", sid); c["text"] = text; return c }
     static func disconnect(_ sid: UInt32) -> JSON { cmd("disconnect", sid) }
 }

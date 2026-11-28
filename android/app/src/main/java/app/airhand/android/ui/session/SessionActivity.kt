@@ -1,14 +1,18 @@
 package app.airhand.android.ui.session
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.view.Display
 import android.view.KeyEvent
 import android.view.Surface
 import android.view.WindowManager
+import app.airhand.android.core.VirtualDisplaySpec
+import kotlin.math.abs
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -96,7 +100,8 @@ class SessionActivity : ComponentActivity(), RemoteView.Host {
             return
         }
         session = s
-        val tv = s.viewOnly || AirhandApp.isTv(this)
+        val monitor = s.monitorMode
+        val tv = !monitor && (s.viewOnly || AirhandApp.isTv(this))
         volumeControlStream = AudioManager.STREAM_MUSIC
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -108,8 +113,8 @@ class SessionActivity : ComponentActivity(), RemoteView.Host {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
         view = RemoteView(this, this).apply {
-            interactive = !tv
-            if (tv) {
+            interactive = !(tv || monitor)
+            if (tv || monitor) {
                 isFocusable = false
                 isFocusableInTouchMode = false
                 showCursor = false
@@ -143,12 +148,17 @@ class SessionActivity : ComponentActivity(), RemoteView.Host {
         lifecycleScope.launch {
             s.clipboardIn.collect { Toast.makeText(this@SessionActivity, R.string.clipboard_received, Toast.LENGTH_SHORT).show() }
         }
+        // 同步窗口与 Surface 刷新率偏好（让 90/120 Hz 平板真正按高刷输出画面）
+        applyDisplayRefreshRate(s.quality.value.fps)
+        lifecycleScope.launch {
+            s.quality.collect { q -> applyDisplayRefreshRate(q.fps) }
+        }
         setContent {
             AirhandTheme(dark = true) {
-                if (tv) {
-                    TvSession(s, view, onExit = ::exit)
-                } else {
-                    PhoneSession(s, view, keyboard, keyboardOpen, landscape.value, onRotate = ::rotate, onExit = ::exit)
+                when {
+                    monitor -> MonitorSession(s, view, landscape.value, onRotate = ::rotate, onExit = ::exit)
+                    tv -> TvSession(s, view, onExit = ::exit)
+                    else -> PhoneSession(s, view, keyboard, keyboardOpen, landscape.value, onRotate = ::rotate, onExit = ::exit)
                 }
             }
         }
@@ -250,6 +260,57 @@ class SessionActivity : ComponentActivity(), RemoteView.Host {
     override fun onToggleKeyboard() {
         keyboardOpen.value = !keyboardOpen.value
     }
+
+    /** 按目标帧率请求对应的窗口刷新率与显示模式，并同步给 SurfaceFlinger */
+    private fun applyDisplayRefreshRate(fps: Int) {
+        val target = fps.coerceIn(30, 120).toFloat()
+        if (::view.isInitialized) view.setTargetFps(fps)
+        runCatching {
+            val d = currentDisplay(this)
+            val lp = window.attributes
+            var changed = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && d != null) {
+                val cur = d.mode
+                val sameSize = d.supportedModes.filter {
+                    it.physicalWidth == cur.physicalWidth && it.physicalHeight == cur.physicalHeight
+                }
+                val best = sameSize.minWithOrNull(
+                    compareBy<Display.Mode>(
+                        { if (it.refreshRate + 1f >= target) 0 else 1 },
+                        { abs(it.refreshRate - target) },
+                    ),
+                )
+                if (best != null && lp.preferredDisplayModeId != best.modeId) {
+                    lp.preferredDisplayModeId = best.modeId
+                    changed = true
+                }
+            }
+            if (lp.preferredRefreshRate != target) {
+                lp.preferredRefreshRate = target
+                changed = true
+            }
+            if (changed) window.attributes = lp
+        }
+    }
+}
+
+@Suppress("DEPRECATION")
+internal fun currentDisplay(ctx: Context): Display? =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        runCatching { ctx.display }.getOrNull()
+    } else {
+        null
+    } ?: (ctx.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)?.defaultDisplay
+
+/** 检测本机屏幕支持的最高刷新率并归档为 60 / 90 / 120 Hz */
+fun deviceMaxRefreshHz(ctx: Context): Int {
+    val d = currentDisplay(ctx) ?: return 60
+    val maxHz = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        runCatching { d.supportedModes.maxOfOrNull { it.refreshRate } }.getOrNull() ?: d.refreshRate
+    } else {
+        d.refreshRate
+    }
+    return VirtualDisplaySpec.snapHz(maxHz)
 }
 
 /**
@@ -261,6 +322,7 @@ fun SessionStatus(session: RemoteSession, big: Boolean, onExit: () -> Unit): Boo
     val ctx = LocalContext.current
     val phase by session.phase.collectAsState()
     val video by session.videoSize.collectAsState()
+    val rendered by session.frameRendered.collectAsState()
     val name by session.hostName.collectAsState()
     val who = name.ifBlank { Code.format(session.code) }
     LaunchedEffect(phase) { if (phase is RemoteSession.Phase.Closed) onExit() }
@@ -269,7 +331,7 @@ fun SessionStatus(session: RemoteSession, big: Boolean, onExit: () -> Unit): Boo
 
     val st: St? = when (val p = phase) {
         RemoteSession.Phase.Connecting -> St(true, ctx.getString(R.string.session_connecting, who), null, false, false, true)
-        RemoteSession.Phase.Live -> if (video == null) St(true, ctx.getString(R.string.session_waiting_video), null, false, false, false) else null
+        RemoteSession.Phase.Live -> if (!session.monitorMode && (video == null || !rendered)) St(true, ctx.getString(R.string.session_waiting_video), null, false, false, false) else null
         is RemoteSession.Phase.Reconnecting -> St(true, ctx.getString(R.string.session_reconnecting), Messages.problem(ctx, p.reason), false, false, true)
         is RemoteSession.Phase.WaitingHost -> St(true, ctx.getString(R.string.session_waiting_host, who), ctx.getString(R.string.session_waiting_host_detail), true, false, true)
         is RemoteSession.Phase.Ended -> St(false, ctx.getString(R.string.session_ended), Messages.problem(ctx, p.reason), true, true, true)

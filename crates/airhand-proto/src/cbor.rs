@@ -161,6 +161,37 @@ pub mod opt {
     }
 }
 
+/// 默认为 `false` 的布尔字段：末尾省略时不写，中间跳过（`null`）时解码为 `false`。
+/// 用法：`#[cbor(n(i), with = "crate::cbor::opt_bool", has_nil)]`
+pub mod opt_bool {
+    use super::*;
+
+    pub fn encode<Ctx, W: Write>(
+        v: &bool,
+        e: &mut Encoder<W>,
+        _: &mut Ctx,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.bool(*v)?;
+        Ok(())
+    }
+
+    pub fn decode<Ctx>(d: &mut Decoder<'_>, _: &mut Ctx) -> Result<bool, Error> {
+        if matches!(d.datatype()?, Type::Null | Type::Undefined) {
+            d.skip()?;
+            return Ok(false);
+        }
+        d.bool()
+    }
+
+    pub fn nil() -> Option<bool> {
+        Some(false)
+    }
+
+    pub fn is_nil(v: &bool) -> bool {
+        !*v
+    }
+}
+
 /// 开放枚举（见模块说明）：只有编号的枚举，线上是一个整数，本版本不认识的值是 `Unknown(原值)`。
 ///
 /// 交给界面的 JSON 是每个变体给定的名字（camelCase 的字符串），不认识的值是原来的整数；

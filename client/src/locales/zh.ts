@@ -280,6 +280,19 @@ export default {
   "privacy.startingMac": "正在打开",
   "privacy.unavailableMac": "对方 Mac 用不了：要先在那台 Mac 的“系统设置 → 隐私与安全性 → 辅助功能”里允许 Airhand（挡住它的键盘鼠标要用到）",
 
+  // 扩展虚拟显示器（无线副屏）
+  "extend.toggle": "扩展虚拟副屏",
+  "extend.off": "在对方电脑上新建一块虚拟显示器作为扩展副屏（不关闭对方本机屏幕），断开连接后自动移除",
+  "extend.starting": "正在创建虚拟副屏…",
+  "extend.on": "已开启：{display}（{w}×{h}）",
+  "extend.failed": "无法开启扩展副屏（{detail}）",
+  "extend.unavailableWindows": "对方电脑用不了：需要为所有用户安装 Airhand，并在安装时装上虚拟显示器驱动",
+  "extend.unavailableMac": "对方 Mac 不支持创建虚拟显示器",
+  "extend.unavailableLinux": "对方 Linux 电脑用不了：没有可用的空闲 X11 RandR 输出或 CRTC",
+  "extend.notAllowed": "对方电脑的设置不允许扩展虚拟副屏（config.toml 里的 extend_display）",
+  "extend.resolution": "屏幕比例与分辨率",
+  "extend.swapOrientation": "旋转 90°",
+
   // 快捷键
   "combo.winStart": "Win 开始菜单",
   "combo.altTab": "Alt + Tab 切换窗口",

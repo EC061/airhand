@@ -56,6 +56,7 @@ class VideoDecoder(
     private val onError: (String) -> Unit = {},
     private val onTooLarge: (Codec, Int, Int) -> Unit = { _, _, _ -> },
     private val onStats: (DecoderStats?) -> Unit = {},
+    private val onRendered: (Int, Int) -> Unit = { _, _ -> },
 ) {
     private val thread = HandlerThread("airhand-decode").apply { start() }
     private val handler = Handler(thread.looper)
@@ -63,6 +64,8 @@ class VideoDecoder(
     private var surface: Surface? = null
     private var codec: MediaCodec? = null
     private var config: Triple<Codec, Int, Int>? = null
+    @Volatile
+    private var targetFps = 60
 
     /** 现在用的解码器（[onStats] 报的）和上次报的时刻（elapsedRealtime） */
     private var active: DecoderStats? = null
@@ -70,12 +73,26 @@ class VideoDecoder(
     private val pending = ArrayDeque<VideoPacket>()
     private val freeInputs = ArrayDeque<Int>()
     private var needKey = true
+    private var rendered = false
+    /** Surface 还没就绪时缓存最新一帧关键帧（深拷贝负载），Surface 准备好后立刻送入解码，避免长时间黑屏等待重发 */
+    private var cachedKey: VideoPacket? = null
     private var lastKeyRequest = 0L
     private var released = false
     private var pendingBytes = 0L
     private var decodeAvgNs = 0L
     private val decoding = LinkedHashMap<Long, Long>()
     private val feedTask = Runnable { feed() }
+    private val renderWatchdog: Runnable = Runnable {
+        if (!released && surface != null && !rendered) {
+            askKeyframe(force = true)
+            handler.postDelayed(renderWatchdog, 1000L)
+        }
+    }
+
+    /** 告知解码器目标帧率（供高刷 90/120 fps 配置时钟与缓冲） */
+    fun setTargetFps(fps: Int) {
+        targetFps = fps.coerceIn(30, 120)
+    }
 
     /** 开关改变、声音结束：重新计算等待时间，让画面及时恢复低延迟。 */
     fun refreshTiming() {
@@ -90,7 +107,15 @@ class VideoDecoder(
             pending.clear()
             releaseCodec()
             needKey = true
-            if (s != null) askKeyframe(force = true)
+            rendered = false
+            handler.removeCallbacks(renderWatchdog)
+            if (s != null) {
+                val cached = cachedKey
+                cachedKey = null
+                if (cached != null) onPacket(cached)
+                askKeyframe(force = true)
+                handler.postDelayed(renderWatchdog, 800L)
+            }
         }
     }
 
@@ -102,14 +127,20 @@ class VideoDecoder(
     fun resetStream() {
         handler.post {
             pending.clear()
+            cachedKey = null
             releaseCodec()
             needKey = true
+            rendered = false
+            handler.removeCallbacks(renderWatchdog)
+            if (surface != null) handler.postDelayed(renderWatchdog, 800L)
         }
     }
 
     fun release() {
         handler.post {
             released = true
+            handler.removeCallbacks(renderWatchdog)
+            cachedKey = null
             pending.forEach { it.ack() }
             pending.clear()
             releaseCodec()
@@ -126,7 +157,15 @@ class VideoDecoder(
     }
 
     private fun onPacket(p: VideoPacket) {
-        if (released || surface == null) {
+        if (released) {
+            p.ack()
+            return
+        }
+        if (surface == null) {
+            if (p.key && p.length > 0 && p.offset + p.length <= p.data.size) {
+                val copy = p.data.copyOfRange(p.offset, p.offset + p.length)
+                cachedKey = VideoPacket(p.seq, true, p.codec, p.width, p.height, p.ptsUs, copy, 0, copy.size) {}
+            }
             p.ack()
             return
         }
@@ -235,6 +274,8 @@ class VideoDecoder(
         val lowLatency = basic().apply {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             setInteger(MediaFormat.KEY_PRIORITY, 0)
+            setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
+            setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
             // 各家芯片自己的低延迟开关（不认识的键会被忽略），与 Moonlight 相同
             setInteger("vendor.qti-ext-dec-low-latency.enable", 1)
             setInteger("vendor.qti-ext-dec-picture-order.enable", 1)
@@ -315,6 +356,11 @@ class VideoDecoder(
                 val render = info.size > 0 || (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) == 0
                 if (render && sync.enabled) codec.releaseOutputBuffer(index, sync.renderTimeNs(info.presentationTimeUs, now))
                 else codec.releaseOutputBuffer(index, render)
+                if (render && info.size > 0) {
+                    rendered = true
+                    handler.removeCallbacks(renderWatchdog)
+                    config?.let { (_, w, h) -> onRendered(w, h) }
+                }
                 feed()
             } catch (e: Exception) {
                 Log.w(TAG, "releaseOutputBuffer: $e")

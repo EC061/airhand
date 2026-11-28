@@ -290,6 +290,7 @@
     <string name="hide_keyboard">收起键盘</string>
     <string name="display_n">显示器 %1$d</string>
     <string name="display_primary">主显示器</string>
+    <string name="display_extended">扩展副屏</string>
     <string name="clipboard_send">同步到对方的剪贴板</string>
     <string name="clipboard_send_desc">把本机复制的文字发过去，对方可以粘贴</string>
     <string name="clipboard_sent">已发送到对方的剪贴板</string>
@@ -308,6 +309,26 @@
     <string name="privacy_unavailable_mac">对方 Mac 用不了：要先在那台 Mac 的“系统设置 → 隐私与安全性 → 辅助功能”里允许 Airhand（挡住它的键盘鼠标要用到）</string>
     <string name="privacy_not_allowed">对方电脑的设置不允许防窥模式（config.toml 里的 privacy_mode）</string>
     <string name="privacy_note">对方电脑前的人可以断开它的网络或者重启它来结束防窥模式</string>
+
+    <!-- 扩展虚拟显示器（无线副屏） -->
+    <string name="extend_toggle">扩展虚拟副屏</string>
+    <string name="extend_off">在对方电脑上新建一块虚拟显示器作为扩展副屏（不关闭对方本机屏幕），并自动切换到这块副屏。断开连接后自动移除</string>
+    <string name="extend_starting">正在创建虚拟副屏…</string>
+    <string name="extend_on">已开启：%1$s（%2$d×%3$d），可直接从对方桌面把窗口拖到这块屏幕上</string>
+    <string name="extend_on_hz">已开启：%1$s（%2$d×%3$d · %4$d Hz），可直接从对方桌面把窗口拖到这块屏幕上</string>
+    <string name="extend_failed">无法开启扩展副屏（%1$s）</string>
+    <string name="extend_unavailable_windows">对方电脑用不了：需要为所有用户安装 Airhand，并在安装时装上虚拟显示器驱动</string>
+    <string name="extend_unavailable_mac">对方 Mac 不支持创建虚拟显示器</string>
+    <string name="extend_unavailable_linux">对方 Linux 电脑用不了：没有可用的空闲 X11 RandR 输出或 CRTC</string>
+    <string name="extend_not_allowed">对方电脑的设置不允许扩展虚拟副屏（config.toml 里的 extend_display）</string>
+    <string name="extend_resolution">屏幕比例与分辨率</string>
+    <string name="extend_refresh_rate">刷新率</string>
+    <string name="quality_fps">帧率</string>
+    <string name="hz_value">%1$d Hz</string>
+    <string name="fps_value">%1$d fps</string>
+    <string name="extend_match_screen">匹配本机屏幕（%1$d×%2$d）</string>
+    <string name="extend_swap_orientation">旋转 90°</string>
+    <string name="extend_hidpi">HiDPI 缩放</string>
 
     <!-- 游戏按键：控制电脑时叠在画面上的按钮和摇杆 -->
     <string name="game_show">在画面上显示</string>
@@ -516,4 +537,15 @@
     <string name="tv_scale_fit">完整显示</string>
     <string name="tv_scale_fill">铺满（裁掉边缘）</string>
     <string name="tv_scale_stretch">拉伸全屏</string>
+
+    <!-- 无线副屏模式 -->
+    <string name="connect_second_monitor">作为副屏</string>
+    <string name="monitor_active">无线副屏 · 点击返回</string>
+    <string name="monitor_settings">副屏设置</string>
+    <string name="monitor_display_options">显示与声音</string>
+    <string name="monitor_setting_up">正在创建无线副屏（%1$d×%2$d）…</string>
+    <string name="monitor_setting_up_hint">正在等待对方电脑挂载虚拟显示器并输出首帧画面</string>
+    <string name="monitor_unavailable_title">无法使用无线副屏</string>
+    <string name="monitor_stopped">对方电脑已关闭扩展虚拟副屏</string>
+    <string name="monitor_disconnect_text">断开与“%1$s”的无线副屏并移除虚拟显示器？</string>
 </resources>

@@ -81,7 +81,7 @@ use airhand_proto::framing;
 use airhand_proto::handshake::SEAL_OVERHEAD;
 use airhand_proto::media;
 use airhand_proto::session::{
-    ControllerMsg, InputEvent, MAX_CLIPBOARD_TEXT, QualitySettings, StreamView,
+    ControllerMsg, InputEvent, MAX_CLIPBOARD_TEXT, QualitySettings, StreamView, VirtualDisplaySpec,
 };
 use airhand_proto::signal::{ClientMsg, ResumeToken, ServerMsg, SessionGrant, connect_outcome};
 use airhand_proto::{MAX_SIGNAL_MSG, Role};
@@ -221,6 +221,12 @@ pub enum Command {
         sid: u32,
         on: bool,
     },
+    /// 开启 / 调整 / 关闭被控端的扩展虚拟显示器（无线副屏：`Some(spec)` 开启或改分辨率，`None` 关闭）
+    Extend {
+        sid: u32,
+        #[serde(default)]
+        spec: Option<VirtualDisplaySpec>,
+    },
     /// 把界面复制的文本发给被控端（网页版、Android：剪贴板由界面自己读）。走大块通道，网络慢、
     /// 前面还排着好几次没发完时丢掉这一次
     Clipboard {
@@ -262,6 +268,7 @@ impl Command {
             | Command::Audio { sid, .. }
             | Command::Mic { sid, .. }
             | Command::Privacy { sid, .. }
+            | Command::Extend { sid, .. }
             | Command::Clipboard { sid, .. }
             | Command::ClipboardSync { sid, .. }
             | Command::ClipboardCleared { sid }
@@ -300,6 +307,9 @@ pub struct ConnectOptions {
     /// 开始时要不要防窥模式（见模块说明的"防窥模式"）：重连时带上界面现在的开关
     #[serde(default)]
     pub privacy: bool,
+    /// 开始时要不要扩展虚拟显示器（无线副屏）：重连时带上，被控端保持着不被撤掉
+    #[serde(default)]
+    pub extend: Option<VirtualDisplaySpec>,
 }
 
 #[derive(Clone)]
@@ -427,6 +437,7 @@ impl ControllerService {
             opts.audio,
             opts.view,
             opts.privacy,
+            opts.extend,
         );
         let (initiator, init) = secure::initiate(InitiatorParams {
             code,
@@ -617,6 +628,12 @@ impl ControllerService {
             }
             Command::Audio { sid, enabled } => (sid, ControllerMsg::Audio { enabled }),
             Command::Privacy { sid, on } => (sid, ControllerMsg::Privacy { on }),
+            Command::Extend { sid, spec } => (
+                sid,
+                ControllerMsg::Extend {
+                    spec: spec.map(VirtualDisplaySpec::sanitized),
+                },
+            ),
             Command::Mic { sid, enabled } => {
                 let sessions = self.inner.sessions.lock().unwrap();
                 let s = sessions.get(&sid).ok_or(Problem::NoSession)?;

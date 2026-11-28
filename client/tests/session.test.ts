@@ -66,6 +66,7 @@ function sessionHarness(connect?: (code: string, resume: any, opts: any) => Prom
           c.cmd === "settings" ? [c.cmd, c.sid, c.settings]
           : c.cmd === "mic" ? [c.cmd, c.sid, c.enabled]
           : c.cmd === "privacy" ? [c.cmd, c.sid, c.on]
+          : c.cmd === "extend" ? [c.cmd, c.sid, c.spec]
           : c.cmd === "view" ? [c.cmd, c.sid, plain(c.streams)]
           : [c.cmd, c.sid],
         );
@@ -636,6 +637,52 @@ test("防窥模式：对方说了状态才能开；打开时先显示正在打�
   assert.equal(s.privacyDetail, "the virtual display didn't show up");
   await s.start();
   assert.equal(opts.privacy, false);
+});
+
+test("扩展虚拟副屏：对方说了可用才能开；开着时重连在连接选项里带上；失败后清掉", async () => {
+  let opts: any;
+  const h = sessionHarness(async (_code, _resume, o) => {
+    opts = o;
+    return granted;
+  });
+  const s = h.session;
+  const spec = { width: 1920, height: 1200, hz: 60, hidpi: false };
+  Object.assign(s, { extendWanted: null, extendState: null, extendDisplay: null, extendDetail: null, extendSpec: spec });
+  await s.start();
+  assert.equal(opts.extend, undefined);
+  const sent = () => h.calls.filter((c) => Array.isArray(c) && c[0] === "extend");
+
+  // 对方还没说状态：不发
+  s.setExtend(spec);
+  assert.deepEqual(sent(), []);
+  h.event({ type: "extend", state: "off", display: null, detail: null });
+  assert.equal(s.extendWanted, null);
+
+  s.setExtend(spec);
+  assert.deepEqual(plain(sent()), [["extend", 7, spec]]);
+  assert.equal(s.extendState, "starting");
+  h.event({ type: "extend", state: "on", display: "DP-1", detail: null });
+  assert.equal(s.extendDisplay, "DP-1");
+  assert.deepEqual(plain(s.extendWanted), spec);
+
+  // 断线重连：在连接选项里带上期望的规格
+  await s.start();
+  assert.deepEqual(plain(opts.extend), spec);
+  assert.equal(s.extendState, null);
+
+  // 即使对方在 confirmed 之前先发了一个临时的 off，随后 starting/on 会恢复 extendWanted，第二次重连仍带 extend
+  h.event({ type: "extend", state: "off", display: null, detail: null });
+  h.event({ type: "extend", state: "on", display: "DUMMY1", detail: null });
+  assert.deepEqual(plain(s.extendWanted), spec);
+  await s.start();
+  assert.deepEqual(plain(opts.extend), spec, "第二次重连仍带 extend");
+
+  // 对方失败：清掉期望，下次重连不再带
+  h.event({ type: "extend", state: "failed", display: null, detail: "no free CRTC" });
+  assert.equal(s.extendWanted, null);
+  assert.equal(s.extendDetail, "no free CRTC");
+  await s.start();
+  assert.equal(opts.extend, undefined);
 });
 
 test("stale completion cannot finish a newer attempt", () => {

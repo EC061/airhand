@@ -142,9 +142,11 @@ struct SessionMenu: View {
                 Divider().overlay(Theme.stroke).padding(.leading, 50)
                 NavigationLink { ClipboardPage(app: app, session: session) } label: { row("doc.on.clipboard", L.t("menu_clipboard")) }
             }
-            if session.displays.count > 1 {
+            if session.displays.count > 1 || (session.extendState != nil && !session.viewOnly) {
                 Divider().overlay(Theme.stroke).padding(.leading, 50)
-                NavigationLink { DisplaysPage(session: session) } label: { row("display.2", L.t("menu_displays")) }
+                NavigationLink { DisplaysPage(session: session) } label: {
+                    row("display.2", L.t("menu_displays"), value: session.extendState?.active == true ? L.t("on") : nil)
+                }
             }
             // 防窥模式：对方（Windows、Mac）说了它的状态才有；点开是开关和说明（开不了时写着为什么）
             if let p = session.privacyState, !session.viewOnly {
@@ -353,18 +355,72 @@ struct ClipboardPage: View {
 struct DisplaysPage: View {
     let session: RemoteSession
 
+    private static let presets: [(String, VirtualDisplaySpec)] = [
+        ("16:10 · 1920×1200", VirtualDisplaySpec(width: 1920, height: 1200)),
+        ("16:10 · 2560×1600", VirtualDisplaySpec(width: 2560, height: 1600)),
+        ("16:9 · 1920×1080", VirtualDisplaySpec(width: 1920, height: 1080)),
+        ("16:9 · 2560×1440", VirtualDisplaySpec(width: 2560, height: 1440)),
+        ("4:3 · 1600×1200", VirtualDisplaySpec(width: 1600, height: 1200)),
+        ("4:3 · 2048×1536", VirtualDisplaySpec(width: 2048, height: 1536)),
+        ("3:2 · 1920×1280", VirtualDisplaySpec(width: 1920, height: 1280)),
+    ]
+
     var body: some View {
         List {
-            ForEach(session.displays) { d in
-                Button { session.selectDisplay(d.index) } label: {
-                    HStack {
-                        Image(systemName: "display").foregroundStyle(Theme.c3)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(d.name.isEmpty ? L.t("display_n", d.index + 1) : d.name).foregroundStyle(Theme.text)
-                            Text("\(d.width)×\(d.height)\(d.primary ? " · " + L.t("display_primary") : "")").font(.caption).foregroundStyle(Theme.sub)
+            if !session.displays.isEmpty {
+                Section {
+                    ForEach(session.displays) { d in
+                        let isExtended = session.extendState == .on && session.extendDisplay != nil && d.name == session.extendDisplay
+                        Button { session.selectDisplay(d.index) } label: {
+                            HStack {
+                                Image(systemName: "display").foregroundStyle(Theme.c3)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(d.name.isEmpty ? L.t("display_n", d.index + 1) : d.name).foregroundStyle(Theme.text)
+                                    Text("\(d.width)×\(d.height)\(d.primary ? " · " + L.t("display_primary") : "")\(isExtended ? " · " + L.t("display_extended") : "")").font(.caption).foregroundStyle(Theme.sub)
+                                }
+                                Spacer()
+                                if d.index == session.currentDisplay { Image(systemName: "checkmark").foregroundStyle(Theme.c3) }
+                            }
                         }
-                        Spacer()
-                        if d.index == session.currentDisplay { Image(systemName: "checkmark").foregroundStyle(Theme.c3) }
+                    }
+                }
+            }
+            if let st = session.extendState, !session.viewOnly {
+                Section(L.t("extend_toggle")) {
+                    Toggle(isOn: Binding(get: { st.active }, set: { session.setExtend($0 ? session.extendSpec : nil) })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(L.t("extend_toggle"))
+                            Text(extendHint(st)).font(.caption).foregroundStyle(st == .failed ? Theme.bad : Theme.sub)
+                        }
+                    }
+                    .disabled(!st.usable)
+                    if st.usable {
+                        ForEach(Self.presets, id: \.0) { label, spec in
+                            Button {
+                                let next = VirtualDisplaySpec(width: spec.width, height: spec.height, hz: spec.hz, hidpi: session.os == .mac && session.extendSpec.hidpi)
+                                session.extendSpec = next
+                                if st.active { session.setExtend(next) }
+                            } label: {
+                                HStack {
+                                    Text(label).foregroundStyle(Theme.text)
+                                    Spacer()
+                                    if session.extendSpec.width == spec.width && session.extendSpec.height == spec.height {
+                                        Image(systemName: "checkmark").foregroundStyle(Theme.c3)
+                                    }
+                                }
+                            }
+                        }
+                        Button {
+                            let next = session.extendSpec.swapped
+                            session.extendSpec = next
+                            if st.active { session.setExtend(next) }
+                        } label: {
+                            HStack {
+                                Text(L.t("extend_swap_orientation")).foregroundStyle(Theme.text)
+                                Spacer()
+                                Text("\(session.extendSpec.height)×\(session.extendSpec.width)").font(.caption).foregroundStyle(Theme.sub)
+                            }
+                        }
                     }
                 }
             }
@@ -374,6 +430,22 @@ struct DisplaysPage: View {
         .navigationTitle(L.t("menu_displays"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
+    }
+
+    private func extendHint(_ s: ExtendState) -> String {
+        switch s {
+        case .unavailable:
+            switch session.os {
+            case .mac: return L.t("extend_unavailable_mac")
+            case .linux: return L.t("extend_unavailable_linux")
+            default: return L.t("extend_unavailable_windows")
+            }
+        case .notAllowed: return L.t("extend_not_allowed")
+        case .starting: return L.t("extend_starting")
+        case .on: return L.t("extend_on", session.extendDisplay ?? "—", session.extendSpec.width, session.extendSpec.height)
+        case .failed: return L.t("extend_failed", session.extendDetail ?? "—")
+        case .off: return L.t("extend_off")
+        }
     }
 }
 

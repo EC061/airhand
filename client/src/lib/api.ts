@@ -205,7 +205,20 @@ export interface ConnectOptions {
   view?: StreamView[];
   /** 开始时要不要防窥模式：重连时带上现在的开关，对方的屏幕不会在重连的间隙里露出来；不带是不要 */
   privacy?: boolean;
+  /** 开始时要不要扩展虚拟显示器（无线副屏）：重连时带上现在的规格；不带是不要 */
+  extend?: VirtualDisplaySpec | null;
 }
+
+/** 扩展虚拟显示器（无线副屏）规格，与 airhand_proto::session::VirtualDisplaySpec 对应 */
+export interface VirtualDisplaySpec {
+  width: number;
+  height: number;
+  hz: number;
+  hidpi: boolean;
+}
+
+/** 扩展虚拟显示器（无线副屏）状态，与 airhand_proto::session::ExtendState 对应 */
+export type ExtendState = "unavailable" | "notAllowed" | "off" | "starting" | "on" | "failed";
 
 /**
  * 剪贴板里的文件的一项（airhand_proto::files::FileEntry）：公告里 path 只有一段（名称），列表里是相对被列的目录的几段。
@@ -307,6 +320,8 @@ export type SessionEvent =
   | { type: "mic"; state: MicState; detail: string | null }
   /** 被控端的防窥模式：会话开始时一次，之后有变化再来；对方不支持（Linux、手机、版本旧）时没有。detail：没能打开的原因 */
   | { type: "privacy"; state: PrivacyState; detail: string | null }
+  /** 被控端的扩展虚拟显示器（无线副屏）：会话开始时一次，之后有变化再来；对方不支持时没有 */
+  | { type: "extend"; state: ExtendState; display: string | null; detail: string | null }
   /** 被控端复制了文件（只有网页版会收到；桌面版直接放进本机剪贴板）：要内容时用 remoteList / remoteRead 取 */
   | { type: "clipboardFiles"; clip: number; items: FileEntry[] }
   /** 剪贴板里的文件传不了（被控端那边的、这边的）：哪个文件、为什么 */
@@ -348,6 +363,8 @@ export type Command =
   | { cmd: "mic"; sid: number; enabled: boolean }
   /** 打开 / 关闭被控端的防窥模式（对方的显示器黑屏、键盘鼠标不起作用） */
   | { cmd: "privacy"; sid: number; on: boolean }
+  /** 开启 / 调整 / 关闭被控端的扩展虚拟显示器（无线副屏）；spec 为 null 时关闭 */
+  | { cmd: "extend"; sid: number; spec: VirtualDisplaySpec | null }
   /** 把这里复制的文本发给被控端（网页版：浏览器自己读剪贴板） */
   | { cmd: "clipboard"; sid: number; text: string }
   /** 打开 / 关闭剪贴板同步 */

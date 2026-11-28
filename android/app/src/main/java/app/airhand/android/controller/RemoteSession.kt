@@ -11,6 +11,7 @@ import app.airhand.android.core.Codec
 import app.airhand.android.core.DecoderStats
 import app.airhand.android.core.DisplayInfo
 import app.airhand.android.core.EncoderInfo
+import app.airhand.android.core.ExtendState
 import app.airhand.android.core.HostHello
 import app.airhand.android.core.Native
 import app.airhand.android.core.Notice
@@ -22,6 +23,7 @@ import app.airhand.android.core.Quality
 import app.airhand.android.core.ServerState
 import app.airhand.android.core.Stats
 import app.airhand.android.core.SystemAction
+import app.airhand.android.core.VirtualDisplaySpec
 import app.airhand.android.core.optStringOrNull
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -66,12 +68,15 @@ class RemoteSession(
     private val app: AirhandApp,
     val code: String,
     resume: String?,
-    /** 只看画面（电视）：不发送任何输入 */
+    /** 只看画面（电视 / 无线副屏）：不发送任何输入 */
     val viewOnly: Boolean,
     /** 之前记下的对方公钥（我的设备）：只认它，对不上是 hostKeyChanged。null：第一次连 */
     hostKey: String? = null,
     /** 配对码（对方要求配对、或者对方的身份变了要重新配对时用户输入的），只用于这一次连接 */
     pairing: String? = null,
+    /** 无线副屏模式：直接建立并显示对方的扩展虚拟显示器，不进远程控制界面、不显示虚拟鼠标、由对方把真实鼠标画进画面 */
+    val monitorMode: Boolean = false,
+    initialExtend: VirtualDisplaySpec? = null,
 ) {
     sealed interface Phase {
         data object Connecting : Phase
@@ -102,8 +107,10 @@ class RemoteSession(
     /** 被控端的提示，按类别（capture / audio / permissions / other）各保留一条 */
     val notices = MutableStateFlow<Map<String, Notice>>(emptyMap())
     val videoSize = MutableStateFlow<Pair<Int, Int>?>(null)
+    /** 本次画面是否已经真正解码并渲染到 Surface 上（用于避免黑屏阶段过早隐藏加载提示） */
+    val frameRendered = MutableStateFlow(false)
     val cursor = MutableStateFlow(CursorState())
-    val audioOn = MutableStateFlow(app.settings.value.audio)
+    val audioOn = MutableStateFlow(if (monitorMode) false else app.settings.value.audio)
     val avSyncOn = MutableStateFlow(app.settings.value.avSync)
 
     /** 锁定鼠标：鼠标一直只发移动了多少、不发位置（被控端隐藏光标时会自动这样，这是手动打开的） */
@@ -132,10 +139,34 @@ class RemoteSession(
     /** 要防窥模式（开关）：重连时在连接选项里带上，对方就一直保持着。跟着对方说的状态变 */
     @Volatile
     private var privacyWanted = false
+
+    /** 对方的扩展虚拟显示器（无线副屏）状态；对方不支持（手机、旧版本）、重连间隙为 null */
+    val extendState = MutableStateFlow<ExtendState?>(null)
+
+    /** 扩展虚拟显示器激活后对应的显示器名 */
+    val extendDisplay = MutableStateFlow<String?>(null)
+
+    /** 扩展虚拟显示器失败原因（英文技术信息） */
+    val extendDetail = MutableStateFlow<String?>(null)
+
+    /** 本会话选择的扩展副屏规格 */
+    val extendSpec = MutableStateFlow(initialExtend ?: VirtualDisplaySpec(1920, 1200))
+
+    /** 本会话是否已按屏幕尺寸初始化过一次默认扩展副屏规格（避免每次重开菜单覆盖用户的选择） */
+    private var extendSpecSeeded = initialExtend != null
+
+    /** 期望的扩展副屏规格：重连时在连接选项里带上，断线重连后保持副屏 */
+    @Volatile
+    private var extendWanted: VirtualDisplaySpec? = initialExtend
     val quality = MutableStateFlow(
-        Preset.of(app.settings.value.preset).quality(
-            VideoDecoder.decodable.firstOrNull { it in Codec.PRIORITY } ?: Codec.H264,
-        ),
+        run {
+            val codec = VideoDecoder.decodable.firstOrNull { it in Codec.PRIORITY } ?: Codec.H264
+            if (monitorMode) {
+                Preset.NATIVE.qualityForFps(codec, initialExtend?.hz ?: 60).copy(drawCursor = true)
+            } else {
+                Preset.of(app.settings.value.preset).quality(codec)
+            }
+        },
     )
 
     private val _clipboard = MutableSharedFlow<String>(extraBufferCapacity = 4)
@@ -184,6 +215,10 @@ class RemoteSession(
         requestKeyframe = { command { Commands.keyframe(it) } },
         onTooLarge = { c, w, h -> onTooLarge(c, w, h) },
         onStats = { decoderStats.value = it },
+        onRendered = { w, h ->
+            if (videoSize.value != w to h) videoSize.value = w to h
+            frameRendered.value = true
+        },
     )
 
     /** 收到过本机解码器放不下的画面：按画面尺寸算出的短边上限（只对那种格式有效；对方换了屏幕 / 转了屏就作废） */
@@ -212,6 +247,7 @@ class RemoteSession(
     }
 
     fun start() {
+        decoder.setTargetFps(quality.value.fps)
         // 等的被控端上线了 / 与服务器重新连上了：叫醒等待中的连接线程
         scope.launch {
             client.hostOnline.collect { if (it == code) signal() }
@@ -256,8 +292,8 @@ class RemoteSession(
                 // 开始时的画质和要不要声音在端到端握手里就告诉对方：它一开始就按这个建编码器
                 val withAudio = audioOn.value && !background
                 sentAudio = withAudio
-                // 防窥模式也在握手里就说：断线重连时对方一直保持着，它的屏幕不会在重连的间隙露出来
-                val cmd = Commands.connect(code, resume, settings, hostKey, pairing, withAudio, privacyWanted)
+                // 防窥模式与扩展副屏也在握手里就说：断线重连时对方保持原状态
+                val cmd = Commands.connect(code, resume, settings, hostKey, pairing, withAudio, privacyWanted, extendWanted)
                 val r = runCatching { JSONObject(Native.ctlCall(h, cmd.toString())) }
                     .getOrElse { JSONObject().put("err", JSONObject().put("kind", "failed").put("detail", it.toString())) }
                 if (closed) {
@@ -270,6 +306,7 @@ class RemoteSession(
                     onConnected(h, ok)
                     val end = pump(h, ok.getInt("sid")) ?: break
                     sid = -1
+                    frameRendered.value = false
                     resetPrivacy()
                     decoder.resetStream()
                     stats.value = null
@@ -486,8 +523,13 @@ class RemoteSession(
                 e.optInt("height"),
             )
             "displays" -> {
+                val prev = currentDisplay.value
                 displays.value = DisplayInfo.parseList(e.optJSONArray("displays"))
                 currentDisplay.value = e.optInt("current")
+                if (monitorMode && currentDisplay.value != prev) {
+                    frameRendered.value = false
+                    decoder.resetStream()
+                }
                 // 转了屏 / 换了屏幕：按新的尺寸重新算解码器放不放得下
                 frameLimit = null
                 refreshSettings()
@@ -550,13 +592,24 @@ class RemoteSession(
                 privacyDetail.value = e.optStringOrNull("detail")
                 privacyState.value = s
             }
+            "extend" -> {
+                val s = ExtendState.fromWire(e.optStringOrNull("state"))
+                // 与防窥模式一致，跟着对方说的变：开启 / 启动中记着当前规格供断线重连携带
+                extendWanted = if (s.active) extendSpec.value else null
+                extendDisplay.value = e.optStringOrNull("display")
+                extendDetail.value = e.optStringOrNull("detail")
+                extendState.value = s
+            }
         }
     }
 
-    /** 新的会话、会话断了：对方还没说它的防窥模式（不显示开关）。要不要开着（[privacyWanted]）留着，重连时告诉对方 */
+    /** 新的会话、会话断了：对方还没重新说防窥与扩展副屏状态（期望值留着，重连时告诉对方） */
     private fun resetPrivacy() {
         privacyState.value = null
         privacyDetail.value = null
+        extendState.value = null
+        extendDisplay.value = null
+        extendDetail.value = null
     }
 
     /** 现在能不能把手机上的文件放进对方的剪贴板（连着） */
@@ -578,7 +631,7 @@ class RemoteSession(
     }
 
     private fun currentSettings(): Quality {
-        val q = quality.value.let { it.copy(maxShort = decodableMaxShort(it)) }
+        val q = quality.value.let { it.copy(maxShort = decodableMaxShort(it), drawCursor = monitorMode) }
         return if (background) q.copy(fps = BACKGROUND_FPS) else q
     }
 
@@ -639,7 +692,29 @@ class RemoteSession(
 
     fun setQuality(q: Quality) {
         quality.value = q
+        decoder.setTargetFps(q.fps)
         sendSettings()
+    }
+
+    /** 单独调整串流帧率（30 / 60 / 90 / 120 fps），保持当前清晰度并按比例调整码率上限 */
+    fun setFps(fps: Int) {
+        val cur = quality.value
+        val clamped = fps.coerceIn(1, 120)
+        val preset = Preset.matchClarity(cur)
+        val next = (preset?.qualityForFps(cur.codec, clamped) ?: cur.copy(fps = clamped)).copy(drawCursor = monitorMode)
+        setQuality(next)
+    }
+
+    /** 无线副屏切换刷新率（60 / 90 / 120 Hz）：同步更新虚拟显示器刷新率与串流帧率 */
+    fun setMonitorRefreshRate(hz: Int) {
+        val targetHz = hz.coerceIn(30, 120)
+        val nextSpec = extendSpec.value.copy(hz = targetHz)
+        if (monitorMode || extendState.value?.active == true) {
+            setExtend(nextSpec)
+        } else {
+            setExtendSpec(nextSpec)
+        }
+        setFps(targetHz)
     }
 
     /**
@@ -701,6 +776,42 @@ class RemoteSession(
         command { Commands.privacy(it, on) }
         privacyDetail.value = null
         privacyState.value = if (on) PrivacyState.STARTING else PrivacyState.OFF
+    }
+
+    /** 首次进入显示器菜单时用当前设备屏幕尺寸初始化一次扩展副屏默认规格 */
+    fun seedExtendSpec(spec: VirtualDisplaySpec) {
+        if (extendSpecSeeded) return
+        extendSpecSeeded = true
+        if (extendWanted == null && extendState.value?.active != true) {
+            extendSpec.value = spec
+        }
+    }
+
+    /** 更新本会话选中的扩展副屏规格（开启中则立即切换，未开启时仅记住选择） */
+    fun setExtendSpec(spec: VirtualDisplaySpec) {
+        extendSpecSeeded = true
+        extendSpec.value = spec
+        if (extendState.value?.active == true) setExtend(spec)
+    }
+
+    /**
+     * 开启 / 调整 / 关闭对方的扩展虚拟显示器（无线副屏）：对方保留本机物理显示器，同时新增一块指定分辨率的虚拟副屏，
+     * 开启成功后会自动切换到这块副屏。spec 为 null 时关闭虚拟副屏
+     */
+    fun setExtend(spec: VirtualDisplaySpec?) {
+        if (viewOnly && !monitorMode) return
+        val s = extendState.value
+        if (s != null && !s.usable) return
+        if (spec != null) {
+            extendSpecSeeded = true
+            extendSpec.value = spec
+        }
+        extendWanted = spec
+        if (s == null || handle == 0L || sid < 0 || closed) return
+        command { Commands.extend(it, spec) }
+        extendDetail.value = null
+        if (spec == null) extendDisplay.value = null
+        extendState.value = if (spec != null) ExtendState.STARTING else ExtendState.OFF
     }
 
     @Synchronized

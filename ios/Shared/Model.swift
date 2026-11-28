@@ -169,6 +169,26 @@ enum PrivacyState: String, CaseIterable {
     var usable: Bool { self != .unavailable && self != .notAllowed }
 }
 
+/// 扩展虚拟显示器（无线副屏）规格，与 Rust 的 `airhand_proto::session::VirtualDisplaySpec` 对应
+struct VirtualDisplaySpec: Equatable {
+    var width: Int
+    var height: Int
+    var hz: Int = 60
+    var hidpi: Bool = false
+
+    var json: JSON { ["width": width, "height": height, "hz": hz, "hidpi": hidpi] }
+    var swapped: VirtualDisplaySpec { VirtualDisplaySpec(width: height, height: width, hz: hz, hidpi: hidpi) }
+}
+
+/// 扩展虚拟显示器（无线副屏）状态，与 Rust 的 `airhand_proto::session::ExtendState` 对应
+enum ExtendState: String, CaseIterable {
+    case unavailable, notAllowed, off, starting, on, failed
+
+    static func fromWire(_ s: String?) -> ExtendState { s.flatMap(ExtendState.init(rawValue:)) ?? .unavailable }
+    var active: Bool { self == .on || self == .starting }
+    var usable: Bool { self != .unavailable && self != .notAllowed }
+}
+
 struct HostHello {
     var hostname: String
     var os: String

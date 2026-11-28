@@ -42,6 +42,8 @@ mod block;
 mod curtain;
 #[cfg(windows)]
 pub(crate) mod device;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(windows)]
@@ -51,19 +53,24 @@ mod plan;
 #[cfg(windows)]
 mod topology;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use airhand_proto::session::PrivacyState;
+use airhand_proto::session::{ExtendState, PrivacyState, VirtualDisplaySpec};
 use tokio::sync::watch;
 
 /// 这个平台有防窥模式（告诉控制端它的状态，控制端才显示这个开关）
 const HAS_PRIVACY: bool = cfg!(any(windows, target_os = "macos"));
+/// 这个平台支持扩展虚拟显示器（无线副屏）
+const HAS_EXTEND: bool = cfg!(any(windows, target_os = "macos", target_os = "linux"));
 
 /// 打开防窥的控制端都走了之后，防窥最多再开这么久。平时不到这么久就关了（[`release_privacy`]），这是兜底：
 /// 万一没人叫它，本机的显示器也不会一直黑着、键盘鼠标一直不能用
 const PRIVACY_HOLD_MAX: Duration = Duration::from_secs(90);
+/// 请求扩展虚拟显示器的最后一个控制端意外断线后，虚拟显示器最多保留这么久（略长于 `ending::RECONNECT` 30 秒，
+/// 让重连窗口内回来时副屏与窗口不丢失；超时或正常断开时由 [`release_extend`] 马上关闭）
+const EXTEND_LINGER: Duration = Duration::from_secs(35);
 /// 最后一个会话结束之后，补屏的虚拟显示器再留这么久（等断线重连）
 #[cfg(any(windows, target_os = "macos"))]
 const SESSION_LINGER: Duration = Duration::from_secs(30);
@@ -95,11 +102,21 @@ pub struct Privacy {
     pub detail: Option<String>,
 }
 
+/// 扩展虚拟显示器（无线副屏）现在怎么样（发给每个控制端：`HostMsg::Extend`）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendStatus {
+    pub state: ExtendState,
+    /// 开启后该虚拟显示器在 `DisplayInfo::name` 里的名字
+    pub display: Option<String>,
+    pub detail: Option<String>,
+}
+
 struct Hub {
     wants: Mutex<Wanted>,
     /// 叫醒管理线程（[`Wanted::poked`]）、等它退出
     wake: Condvar,
     privacy: watch::Sender<Privacy>,
+    extend: watch::Sender<ExtendStatus>,
     /// 改过显示设置、启用停用过虚拟显示器就加一：会话据此马上重新列出显示器
     displays: watch::Sender<u64>,
 }
@@ -114,6 +131,16 @@ struct Wanted {
     linger: Option<Instant>,
     /// 最后一个会话结束的时刻
     idle_since: Option<Instant>,
+    /// 请求扩展虚拟显示器的会话及其期望规格
+    extend_requests: HashMap<u64, VirtualDisplaySpec>,
+    /// 当前生效的扩展规格由哪个会话设定（最近设置的优先）
+    extend_owner: Option<u64>,
+    /// 请求扩展虚拟显示器的控制端意外断线后短暂保留（等重连），正常断开时由 [`release_extend`] 立即清除
+    extend_linger: Option<(Instant, VirtualDisplaySpec)>,
+    /// 管理线程报告的当前已就绪扩展虚拟显示器（规格、显示器名）
+    extend_active: Option<(VirtualDisplaySpec, String)>,
+    /// 上次没能打开或调整扩展虚拟显示器的原因
+    extend_failed: Option<String>,
     /// 被控端在运行、开着"不自动睡眠"（macOS）：没有会话也预备着虚拟显示器（见 `set_ready`）
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ready: bool,
@@ -137,6 +164,23 @@ struct Wanted {
 impl Wanted {
     fn privacy(&self, now: Instant) -> bool {
         !self.holders.is_empty() || self.linger.is_some_and(|t| now < t)
+    }
+
+    /// 当前是否需要扩展虚拟显示器以及目标规格（防窥模式优先，打开防窥时暂停扩展）
+    fn extend_wanted(&self, now: Instant) -> Option<VirtualDisplaySpec> {
+        if self.privacy(now) || !self.usable || !extend_allowed() {
+            return None;
+        }
+        if let Some(owner) = self.extend_owner
+            && let Some(&spec) = self.extend_requests.get(&owner)
+        {
+            return Some(spec);
+        }
+        if let Some((_, &spec)) = self.extend_requests.iter().min_by_key(|(id, _)| *id) {
+            return Some(spec);
+        }
+        self.extend_linger
+            .and_then(|(until, spec)| (now < until).then_some(spec))
     }
 
     #[cfg(any(windows, target_os = "macos"))]
@@ -166,12 +210,22 @@ static HUB: LazyLock<Hub> = LazyLock::new(|| Hub {
         state: PrivacyState::Unavailable,
         detail: None,
     }),
+    extend: watch::Sender::new(ExtendStatus {
+        state: ExtendState::Unavailable,
+        display: None,
+        detail: None,
+    }),
     displays: watch::Sender::new(0),
 });
 
 /// 被控端的设置允许防窥模式
 fn allowed() -> bool {
     crate::config::settings().privacy_mode
+}
+
+/// 被控端的设置允许扩展虚拟显示器
+fn extend_allowed() -> bool {
+    crate::config::settings().extend_display
 }
 
 /// 按现在想要的、管理线程报告的，更新发给控制端的状态
@@ -201,6 +255,50 @@ fn publish(w: &Wanted) {
         *old = p;
         changed
     });
+
+    let ext = if !w.usable {
+        ExtendStatus {
+            state: ExtendState::Unavailable,
+            display: None,
+            detail: None,
+        }
+    } else if !extend_allowed() {
+        ExtendStatus {
+            state: ExtendState::NotAllowed,
+            display: None,
+            detail: None,
+        }
+    } else if let Some(want) = w.extend_wanted(now) {
+        match &w.extend_active {
+            Some((spec, name)) if *spec == want => ExtendStatus {
+                state: ExtendState::On,
+                display: Some(name.clone()),
+                detail: None,
+            },
+            _ => ExtendStatus {
+                state: ExtendState::Starting,
+                display: None,
+                detail: None,
+            },
+        }
+    } else if let Some(d) = &w.extend_failed {
+        ExtendStatus {
+            state: ExtendState::Failed,
+            display: None,
+            detail: Some(d.clone()),
+        }
+    } else {
+        ExtendStatus {
+            state: ExtendState::Off,
+            display: None,
+            detail: None,
+        }
+    };
+    HUB.extend.send_if_modified(|old| {
+        let changed = *old != ext;
+        *old = ext;
+        changed
+    });
 }
 
 /// 防窥没能打开（由管理线程调用）：不再要它，告诉控制端为什么
@@ -211,6 +309,22 @@ fn fail(detail: String) {
     w.holders.clear();
     w.linger = None;
     w.failed = Some(detail);
+    publish(&w);
+}
+
+/// 扩展虚拟显示器没能打开或调整（由管理线程调用）：清掉当前请求者的请求，告诉控制端原因
+fn fail_extend(detail: String) {
+    tracing::warn!("extended virtual display failed: {detail}");
+    let mut w = HUB.wants.lock().unwrap();
+    if let Some(owner) = w.extend_owner.take() {
+        w.extend_requests.remove(&owner);
+        w.extend_owner = w.extend_requests.keys().min().copied();
+    } else {
+        w.extend_requests.clear();
+    }
+    w.extend_linger = None;
+    w.extend_active = None;
+    w.extend_failed = Some(detail);
     publish(&w);
 }
 
@@ -225,14 +339,17 @@ pub fn join(session_id: u64) -> Lease {
     let usable = device::usable();
     #[cfg(target_os = "macos")]
     let usable = mac::usable();
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    let usable = linux::usable();
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     let usable = false;
     #[cfg(target_os = "macos")]
     let privacy = curtain::usable();
     let mut w = HUB.wants.lock().unwrap();
     w.sessions.insert(session_id);
     w.idle_since = None;
-    w.usable = usable;
+    // 自己正开着扩展副屏时，不要因为仅有的那个虚拟输出已被自己占用而把 usable 降为 false
+    w.usable = usable || w.extend_active.is_some();
     #[cfg(target_os = "macos")]
     {
         w.curtain = privacy;
@@ -243,7 +360,7 @@ pub fn join(session_id: u64) -> Lease {
         w.stopping = false;
         manager::spawn();
     }
-    // 补屏、防窥都在 mac 的管理线程上
+    // 补屏、扩展、防窥都在 mac 的管理线程上
     #[cfg(target_os = "macos")]
     if (usable || privacy) && !w.running {
         w.running = true;
@@ -278,14 +395,66 @@ impl Lease {
         w.poke();
     }
 
+    /// 控制端开启 / 调整 / 关闭扩展虚拟显示器（无线副屏）
+    pub fn set_extend(&self, spec: Option<VirtualDisplaySpec>) {
+        let mut w = HUB.wants.lock().unwrap();
+        if !w.usable || !extend_allowed() || !w.sessions.contains(&self.session_id) {
+            return;
+        }
+        w.extend_failed = None;
+        w.extend_linger = None;
+        match spec.map(VirtualDisplaySpec::sanitized) {
+            Some(spec) => {
+                w.extend_requests.insert(self.session_id, spec);
+                w.extend_owner = Some(self.session_id);
+                #[cfg(target_os = "linux")]
+                if !w.running {
+                    w.running = true;
+                    w.stopping = false;
+                    linux::spawn();
+                }
+                tracing::info!(
+                    session_id = self.session_id,
+                    w = spec.width,
+                    h = spec.height,
+                    hz = spec.hz,
+                    hidpi = spec.hidpi,
+                    "the controller requested an extended virtual display"
+                );
+            }
+            None => {
+                w.extend_requests.remove(&self.session_id);
+                if w.extend_owner == Some(self.session_id) {
+                    w.extend_owner = w.extend_requests.keys().min().copied();
+                }
+                tracing::info!(
+                    session_id = self.session_id,
+                    "the controller disabled the extended virtual display"
+                );
+            }
+        }
+        publish(&w);
+        w.poke();
+    }
+
     /// 防窥模式的状态；这个平台没有防窥模式时为 `None`（不告诉控制端，它就不显示这个开关）
     pub fn privacy(&self) -> Option<Privacy> {
         HAS_PRIVACY.then(|| HUB.privacy.borrow().clone())
     }
 
+    /// 扩展虚拟显示器的状态；这个平台不支持时为 `None`
+    pub fn extend(&self) -> Option<ExtendStatus> {
+        HAS_EXTEND.then(|| HUB.extend.borrow().clone())
+    }
+
     /// 防窥模式的状态变了
     pub fn privacy_changes(&self) -> watch::Receiver<Privacy> {
         HUB.privacy.subscribe()
+    }
+
+    /// 扩展虚拟显示器的状态变了
+    pub fn extend_changes(&self) -> watch::Receiver<ExtendStatus> {
+        HUB.extend.subscribe()
     }
 
     /// 改过显示设置了（会话马上重新列出显示器）
@@ -295,7 +464,7 @@ impl Lease {
 
     /// 能补一块虚拟显示器（会话开始时没有显示器的话值得等它，见 [`APPEAR_WAIT`]）
     pub fn can_fill_in(&self) -> bool {
-        HUB.wants.lock().unwrap().usable
+        cfg!(any(windows, target_os = "macos")) && HUB.wants.lock().unwrap().usable
     }
 }
 
@@ -307,6 +476,14 @@ impl Drop for Lease {
         if w.holders.remove(&self.session_id) && w.holders.is_empty() {
             // 打开防窥的都走了：接着开着，远程控制结束了才关（先锁屏，或者给断线的重连的时间，见 host::ending）
             w.linger = Some(now + PRIVACY_HOLD_MAX);
+        }
+        if let Some(prev_spec) = w.extend_requests.remove(&self.session_id) {
+            if w.extend_owner == Some(self.session_id) {
+                w.extend_owner = w.extend_requests.keys().min().copied();
+            }
+            if w.extend_requests.is_empty() {
+                w.extend_linger = Some((now + EXTEND_LINGER, prev_spec));
+            }
         }
         if w.sessions.is_empty() {
             w.idle_since = Some(now);
@@ -325,6 +502,18 @@ pub fn release_privacy() {
     }
     w.linger = None;
     tracing::info!("privacy mode ends with the remote control");
+    publish(&w);
+    w.poke();
+}
+
+/// 远程控制正常结束了：如果没有其他会话仍在请求扩展虚拟显示器，立即关闭它，不再等重连宽限期
+pub fn release_extend() {
+    let mut w = HUB.wants.lock().unwrap();
+    if !w.extend_requests.is_empty() || w.extend_linger.is_none() {
+        return;
+    }
+    w.extend_linger = None;
+    tracing::info!("extended virtual display ends with the remote control");
     publish(&w);
     w.poke();
 }
@@ -383,9 +572,12 @@ pub fn cover_generation() -> u64 {
 pub fn filling_in() -> Option<String> {
     #[cfg(windows)]
     {
-        if HUB.wants.lock().unwrap().privacy(Instant::now()) {
+        let w = HUB.wants.lock().unwrap();
+        let now = Instant::now();
+        if w.privacy(now) || w.extend_wanted(now).is_some() || w.extend_active.is_some() {
             return None;
         }
+        drop(w);
         topology::virtual_name()
     }
     #[cfg(not(windows))]
@@ -400,6 +592,8 @@ pub fn recover() {
     if device::usable() {
         manager::recover();
     }
+    #[cfg(target_os = "linux")]
+    linux::recover();
 }
 
 /// 进程退出：恢复原样（停用虚拟显示器、放回本机的显示器、放开键盘鼠标；macOS 撤掉补屏的虚拟显示器），最多等几秒
@@ -449,5 +643,35 @@ mod tests {
         assert!(!sessions().contains_key(&9001));
         assert!(sessions().contains_key(&9002));
         drop(b);
+    }
+
+    /// 扩展副屏 linger 覆盖整个重连窗口，且多控制端回退顺序确定
+    #[test]
+    fn extend_linger_covers_reconnect_and_owner_handoff_is_deterministic() {
+        assert!(EXTEND_LINGER >= crate::host::ending::RECONNECT);
+        let mut w = Wanted::default();
+        w.usable = true;
+        let s1 = VirtualDisplaySpec {
+            width: 1920,
+            height: 1200,
+            hz: 60,
+            hidpi: false,
+        };
+        let s2 = VirtualDisplaySpec {
+            width: 2560,
+            height: 1600,
+            hz: 60,
+            hidpi: false,
+        };
+        w.extend_requests.insert(20, s2);
+        w.extend_requests.insert(10, s1);
+        w.extend_owner = Some(20);
+        let now = Instant::now();
+        assert_eq!(w.extend_wanted(now), Some(s2));
+        // owner 离开后稳定回退到 session_id 最小的请求者
+        w.extend_requests.remove(&20);
+        w.extend_owner = w.extend_requests.keys().min().copied();
+        assert_eq!(w.extend_owner, Some(10));
+        assert_eq!(w.extend_wanted(now), Some(s1));
     }
 }

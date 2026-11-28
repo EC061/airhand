@@ -34,6 +34,16 @@ class CodeTest {
         assertEquals(Preset.BALANCED, Preset.of("nope"))
         assertEquals(Preset.HD, Preset.match(Preset.HD.quality(Codec.AV1)))
         assertEquals(1080, Preset.SMOOTH.maxShort)
+        val q120 = Preset.NATIVE.qualityForFps(Codec.H265, 120)
+        assertEquals(120, q120.fps)
+        assertEquals(45_000, q120.kbps)
+        assertEquals(0, q120.maxShort)
+        assertEquals(Preset.NATIVE, Preset.matchClarity(q120))
+        assertEquals(Preset.HD, Preset.matchClarity(Preset.HD.qualityForFps(Codec.H264, 90)))
+        assertEquals(60, VirtualDisplaySpec.snapHz(60f))
+        assertEquals(90, VirtualDisplaySpec.snapHz(90f))
+        assertEquals(120, VirtualDisplaySpec.snapHz(119.88f))
+        assertEquals(120, VirtualDisplaySpec.snapHz(144f))
     }
 
     @Test

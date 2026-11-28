@@ -21,7 +21,7 @@ use airhand_proto::handshake::{
     SEAL_OVERHEAD,
 };
 use airhand_proto::minicbor::{self, Encode};
-use airhand_proto::session::{QualitySettings, StreamView};
+use airhand_proto::session::{QualitySettings, StreamView, VirtualDisplaySpec};
 use airhand_proto::{Role, SESSION_VERSION, SessionLane, datagram};
 use anyhow::{Context, Result, anyhow, bail};
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
@@ -947,7 +947,7 @@ async fn fail<W: AsyncWrite + Unpin>(send: &mut W, e: HandshakeError) {
     .await;
 }
 
-/// 本端的介绍（控制端）：名称、系统，开始时的画质、要不要声音、看哪几个显示器、要不要防窥模式
+/// 本端的介绍（控制端）：名称、系统，开始时的画质、要不要声音、看哪几个显示器、要不要防窥模式、扩展虚拟显示器
 pub fn controller_intro(
     name: &str,
     os: &str,
@@ -955,6 +955,7 @@ pub fn controller_intro(
     audio: bool,
     view: Vec<StreamView>,
     privacy: bool,
+    extend: Option<VirtualDisplaySpec>,
 ) -> ControllerIntro {
     ControllerIntro {
         version: SESSION_VERSION,
@@ -964,6 +965,7 @@ pub fn controller_intro(
         audio,
         view,
         privacy,
+        extend: extend.map(VirtualDisplaySpec::sanitized),
     }
 }
 
@@ -1105,6 +1107,7 @@ mod tests {
             true,
             vec![StreamView::display(1)],
             false,
+            None,
         )
     }
 

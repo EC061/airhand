@@ -107,10 +107,12 @@ import app.airhand.android.controller.RemoteSession
 import app.airhand.android.controller.VideoDecoder
 import app.airhand.android.core.Code
 import app.airhand.android.core.Codec
+import app.airhand.android.core.ExtendState
 import app.airhand.android.core.OsKind
 import app.airhand.android.core.Preset
 import app.airhand.android.core.PrivacyState
 import app.airhand.android.core.SystemAction
+import app.airhand.android.core.VirtualDisplaySpec
 import app.airhand.android.data.Settings
 import app.airhand.android.data.TouchMode
 import app.airhand.android.data.WheelMode
@@ -180,6 +182,8 @@ fun PhoneSession(
     val audioError by session.audioError.collectAsState()
     val privacy by session.privacyState.collectAsState()
     val privacyDetail by session.privacyDetail.collectAsState()
+    val extend by session.extendState.collectAsState()
+    val extendDetail by session.extendDetail.collectAsState()
     val phase by session.phase.collectAsState()
     // 连上之后以对方报告的平台为准
     val os = hello?.platform?.takeIf { it != OsKind.UNKNOWN } ?: OsKind.of(hostOs)
@@ -191,8 +195,9 @@ fun PhoneSession(
     var page by remember { mutableStateOf(Page.MAIN) }
     var confirmExit by remember { mutableStateOf(false) }
     var dismissed by remember { mutableStateOf(setOf<String>()) }
-    // 防窥模式没能打开：菜单关着时也要让用户知道（关掉提示之后再失败一次时重新显示）
+    // 防窥模式 / 扩展副屏没能打开：菜单关着时也要让用户知道（关掉提示之后再失败一次时重新显示）
     LaunchedEffect(privacy) { if (privacy != PrivacyState.FAILED) dismissed = dismissed - PRIVACY_NOTICE }
+    LaunchedEffect(extend) { if (extend != ExtendState.FAILED) dismissed = dismissed - EXTEND_NOTICE }
     val gm = gestureMode(mode, os, touch)
     val tipKey = gm.name.lowercase()
     val showTips = phase == RemoteSession.Phase.Live && video != null && tipKey !in settings.tipsSeen
@@ -268,6 +273,7 @@ fun PhoneSession(
             listOfNotNull(
                 audioError?.let { "localAudio" to ctx.getString(R.string.audio_playback_failed, it) },
                 (PRIVACY_NOTICE to ctx.getString(R.string.privacy_failed, privacyDetail ?: "—")).takeIf { privacy == PrivacyState.FAILED },
+                (EXTEND_NOTICE to ctx.getString(R.string.extend_failed, extendDetail ?: "—")).takeIf { extend == ExtendState.FAILED },
             ).filter { it.first !in dismissed }
         if (editor == null) {
             Column(
@@ -480,6 +486,9 @@ private const val GAME_TIPS = "game"
 /** 画面上方“防窥模式没能打开”的提示（关掉了就记在 dismissed 里） */
 private const val PRIVACY_NOTICE = "privacy"
 
+/** 画面上方“扩展副屏没能打开”的提示 */
+private const val EXTEND_NOTICE = "extend"
+
 // ───────────────────────────── 浮动圆钮 ─────────────────────────────
 
 /** 可以拖动的菜单圆钮，松手后贴到最近的左 / 右边缘；开启 [doubleTapKeyboard] 时双击直接开关键盘 */
@@ -659,6 +668,7 @@ private fun MainMenu(
     val hostOs by session.hostOs.collectAsState()
     val safety by session.safety.collectAsState()
     val privacy by session.privacyState.collectAsState()
+    val extend by session.extendState.collectAsState()
 
     Row(Modifier.padding(horizontal = 20.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         OsAvatar(hostOs, 40.dp)
@@ -722,7 +732,7 @@ private fun MainMenu(
         maxItemsInEachRow = 3,
     ) {
         val cell = Modifier.weight(1f)
-        Action(Icons.Outlined.HighQuality, stringResource(R.string.cat_video), cell, active = privacy?.active == true) { onPage(Page.VIDEO) }
+        Action(Icons.Outlined.HighQuality, stringResource(R.string.cat_video), cell, active = privacy?.active == true || extend?.active == true) { onPage(Page.VIDEO) }
         Action(Icons.AutoMirrored.Outlined.VolumeUp, stringResource(R.string.cat_audio), cell, active = avSyncOn && audioOn) { onPage(Page.AUDIO) }
         Action(Icons.Outlined.Mouse, stringResource(R.string.cat_mouse_touch), cell, active = mouseLock) { onPage(Page.MOUSE_TOUCH) }
         Action(Icons.Outlined.KeyboardCommandKey, stringResource(R.string.cat_keyboard), cell) { onPage(Page.KEYBOARD) }
@@ -898,7 +908,14 @@ private fun SystemActions(actions: List<SystemAction>, onSend: (SystemAction) ->
 private fun Displays(session: RemoteSession, onDone: () -> Unit) {
     val displays by session.displays.collectAsState()
     val current by session.currentDisplay.collectAsState()
+    val extendState by session.extendState.collectAsState()
+    val extendDisplay by session.extendDisplay.collectAsState()
     displays.forEach { d ->
+        val isExtended = extendState == ExtendState.ON && extendDisplay != null && d.name == extendDisplay
+        val suffix = buildString {
+            if (d.primary) append(" · ").append(stringResource(R.string.display_primary))
+            if (isExtended) append(" · ").append(stringResource(R.string.display_extended))
+        }
         Row(
             Modifier
                 .fillMaxWidth()
@@ -913,7 +930,7 @@ private fun Displays(session: RemoteSession, onDone: () -> Unit) {
             Spacer(Modifier.width(12.dp))
             Column {
                 Text(
-                    stringResource(R.string.display_n, d.index + 1) + if (d.primary) " · " + stringResource(R.string.display_primary) else "",
+                    stringResource(R.string.display_n, d.index + 1) + suffix,
                     style = MaterialTheme.typography.bodyLarge,
                 )
                 Text("${d.width} × ${d.height}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -928,7 +945,7 @@ private fun Quality(session: RemoteSession) {
     val q by session.quality.collectAsState()
     val hello by session.hello.collectAsState()
     val encoder by session.encoder.collectAsState()
-    val current = Preset.match(q)
+    val current = Preset.matchClarity(q)
     Preset.entries.forEach { p ->
         Row(
             Modifier
@@ -943,6 +960,17 @@ private fun Quality(session: RemoteSession) {
                 Text(presetName(p), style = MaterialTheme.typography.bodyLarge)
                 Text(presetDesc(p), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+        }
+    }
+    HorizontalDivider(Modifier.padding(vertical = 8.dp, horizontal = 16.dp))
+    Text(stringResource(R.string.quality_fps), style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp))
+    FlowRow(Modifier.padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(30, 60, 90, 120).forEach { fps ->
+            FilterChip(
+                selected = q.fps == fps,
+                onClick = { session.setFps(fps) },
+                label = { Text(stringResource(R.string.fps_value, fps)) },
+            )
         }
     }
     HorizontalDivider(Modifier.padding(vertical = 8.dp, horizontal = 16.dp))
@@ -981,6 +1009,7 @@ private fun VideoCategoryPage(
 ) {
     val displays by session.displays.collectAsState()
     val privacy by session.privacyState.collectAsState()
+    val extend by session.extendState.collectAsState()
 
     ToggleRow(
         title = stringResource(R.string.show_stats),
@@ -1005,6 +1034,11 @@ private fun VideoCategoryPage(
     if (displays.size > 1) {
         MenuSection(stringResource(R.string.menu_displays))
         Displays(session, onDone = onClose)
+    }
+
+    if (extend != null) {
+        MenuSection(stringResource(R.string.extend_toggle))
+        ExtendDisplay(session, os)
     }
 
     if (privacy != null) {
@@ -1278,6 +1312,145 @@ private fun Privacy(session: RemoteSession, os: OsKind) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
         )
+    }
+}
+
+private data class ExtendPreset(val ratio: String, val spec: VirtualDisplaySpec)
+
+private val EXTEND_PRESETS = listOf(
+    ExtendPreset("16:10", VirtualDisplaySpec(1920, 1200)),
+    ExtendPreset("16:10", VirtualDisplaySpec(2560, 1600)),
+    ExtendPreset("16:9", VirtualDisplaySpec(1920, 1080)),
+    ExtendPreset("16:9", VirtualDisplaySpec(2560, 1440)),
+    ExtendPreset("4:3", VirtualDisplaySpec(1600, 1200)),
+    ExtendPreset("4:3", VirtualDisplaySpec(2048, 1536)),
+    ExtendPreset("3:2", VirtualDisplaySpec(1920, 1280)),
+)
+
+/**
+ * 扩展虚拟显示器（无线副屏）：在对方电脑上额外新建一块指定分辨率/比例的虚拟显示器，
+ * 把当前 Android 设备当作无线副屏使用；断开连接后自动关闭并还原桌面。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ExtendDisplay(session: RemoteSession, os: OsKind) {
+    val ctx = LocalContext.current
+    val state by session.extendState.collectAsState()
+    val display by session.extendDisplay.collectAsState()
+    val detail by session.extendDetail.collectAsState()
+    val currentSpec by session.extendSpec.collectAsState()
+    val s = state ?: run {
+        Text(
+            stringResource(R.string.session_reconnecting),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+        )
+        return
+    }
+    val dm = ctx.resources.displayMetrics
+    val defaultHz = remember(ctx) { if (os == OsKind.MAC) 60 else deviceMaxRefreshHz(ctx) }
+    val nativeSpec = remember(dm.widthPixels, dm.heightPixels, currentSpec.hz, currentSpec.hidpi) {
+        VirtualDisplaySpec.matchScreen(dm.widthPixels, dm.heightPixels, hz = currentSpec.hz, hidpi = currentSpec.hidpi)
+    }
+    LaunchedEffect(session, dm.widthPixels, dm.heightPixels, defaultHz) {
+        session.seedExtendSpec(VirtualDisplaySpec.matchScreen(dm.widthPixels, dm.heightPixels, hz = defaultHz))
+    }
+    val hint = when (s) {
+        ExtendState.UNAVAILABLE -> stringResource(
+            when (os) {
+                OsKind.MAC -> R.string.extend_unavailable_mac
+                OsKind.LINUX -> R.string.extend_unavailable_linux
+                else -> R.string.extend_unavailable_windows
+            },
+        )
+        ExtendState.NOT_ALLOWED -> stringResource(R.string.extend_not_allowed)
+        ExtendState.STARTING -> stringResource(R.string.extend_starting)
+        ExtendState.ON -> stringResource(R.string.extend_on_hz, display ?: "—", currentSpec.width, currentSpec.height, currentSpec.hz)
+        ExtendState.FAILED -> stringResource(R.string.extend_failed, detail ?: "—")
+        ExtendState.OFF -> stringResource(R.string.extend_off)
+    }
+    ListItem(
+        headlineContent = { Text(stringResource(R.string.extend_toggle)) },
+        supportingContent = {
+            Text(hint, color = if (s == ExtendState.FAILED) MaterialTheme.colorScheme.error else Color.Unspecified)
+        },
+        trailingContent = {
+            Switch(
+                checked = s.active,
+                onCheckedChange = { on -> session.setExtend(if (on) currentSpec else null) },
+                enabled = s.usable,
+            )
+        },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = s.usable) {
+                session.setExtend(if (s.active) null else currentSpec)
+            }
+            .padding(horizontal = 8.dp),
+    )
+    if (s.usable) {
+        Text(
+            stringResource(R.string.extend_resolution),
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
+        )
+        fun pick(spec: VirtualDisplaySpec) {
+            val next = spec.copy(hz = if (os == OsKind.MAC) 60 else currentSpec.hz, hidpi = if (os == OsKind.MAC) currentSpec.hidpi else false)
+            session.setExtendSpec(next)
+        }
+        FlowRow(
+            Modifier.padding(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            FilterChip(
+                selected = currentSpec.width == nativeSpec.width && currentSpec.height == nativeSpec.height,
+                onClick = { pick(nativeSpec) },
+                label = { Text(stringResource(R.string.extend_match_screen, nativeSpec.width, nativeSpec.height)) },
+            )
+            EXTEND_PRESETS.forEach { preset ->
+                if (preset.spec.width == nativeSpec.width && preset.spec.height == nativeSpec.height) return@forEach
+                val same = currentSpec.width == preset.spec.width && currentSpec.height == preset.spec.height
+                FilterChip(
+                    selected = same,
+                    onClick = { pick(preset.spec) },
+                    label = { Text("${preset.ratio} · ${preset.spec.width}×${preset.spec.height}") },
+                )
+            }
+            FilterChip(
+                selected = currentSpec.height > currentSpec.width,
+                onClick = { pick(currentSpec.swapped()) },
+                label = { Text(stringResource(R.string.extend_swap_orientation)) },
+            )
+            if (os == OsKind.MAC) {
+                FilterChip(
+                    selected = currentSpec.hidpi,
+                    onClick = { session.setExtendSpec(currentSpec.copy(hidpi = !currentSpec.hidpi)) },
+                    label = { Text(stringResource(R.string.extend_hidpi)) },
+                )
+            }
+        }
+        if (os != OsKind.MAC) {
+            Text(
+                stringResource(R.string.extend_refresh_rate),
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
+            )
+            FlowRow(
+                Modifier.padding(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                VirtualDisplaySpec.REFRESH_RATES.forEach { hz ->
+                    FilterChip(
+                        selected = currentSpec.hz == hz,
+                        onClick = { session.setMonitorRefreshRate(hz) },
+                        label = { Text(stringResource(R.string.hz_value, hz)) },
+                    )
+                }
+            }
+        }
     }
 }
 
