@@ -45,7 +45,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, DXGI_OUTPUT_DESC, IDXGIAdapter, IDXGIAdapter1,
     IDXGIDevice, IDXGIFactory1, IDXGIOutput1, IDXGIOutput5, IDXGIOutputDuplication, IDXGIResource,
 };
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, InvalidateRect, MONITORINFO};
 use windows::Win32::UI::WindowsAndMessaging::{
     CURSOR_SHOWING, CURSOR_SUPPRESSED, CURSORINFO, GetCursorInfo,
 };
@@ -406,6 +406,11 @@ pub struct DxgiCapturer {
     gpu: Option<Arc<D3dSource>>,
     staging: Option<(ID3D11Texture2D, u32, u32)>,
     first: bool,
+    /// 打开桌面复制的时刻：新接入的虚拟显示器（如 MttVDD）刚开始可能只返回 LastPresentTime==0 的纯鼠标更新或超时，
+    /// 等 DWM 真正合成第一帧（必要时轻推一次重绘），绝不把全黑的未初始化表面当作第一帧发出
+    opened_at: Instant,
+    /// 是否已经向 DWM 轻推过一次桌面重绘（InvalidateRect）
+    nudged: bool,
     shape_buf: Vec<u8>,
     /// 桌面复制上一次报告的硬件光标是否可见（不可见时每一帧都用 [`software_cursor`] 再看一次）
     hw_cursor: bool,
@@ -514,6 +519,8 @@ impl DxgiCapturer {
                 gpu,
                 staging: None,
                 first: true,
+                opened_at: Instant::now(),
+                nudged: false,
                 shape_buf: Vec::new(),
                 hw_cursor: true,
                 desktop: o.desc.DesktopCoordinates,
@@ -591,6 +598,11 @@ impl Capturer for DxgiCapturer {
                 ..Default::default()
             });
         }
+        if self.first && !self.nudged && self.opened_at.elapsed() >= Duration::from_millis(120) {
+            self.nudged = true;
+            // 新接入的虚拟副屏（MttVDD）若桌面静止，DWM 可能迟迟不触发首次 Present：轻推一次桌面合成
+            let _ = unsafe { InvalidateRect(None, None, false) };
+        }
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut res: Option<IDXGIResource> = None;
         if let Err(e) = unsafe {
@@ -598,6 +610,13 @@ impl Capturer for DxgiCapturer {
                 .AcquireNextFrame(timeout.as_millis() as u32, &mut info, &mut res)
         } {
             if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
+                if self.first
+                    && !self.nudged
+                    && self.opened_at.elapsed() >= Duration::from_millis(120)
+                {
+                    self.nudged = true;
+                    let _ = unsafe { InvalidateRect(None, None, false) };
+                }
                 return Ok(CaptureUpdate::default());
             }
             return Err(anyhow!("AcquireNextFrame: {e}"));
@@ -636,8 +655,11 @@ impl Capturer for DxgiCapturer {
             pointer_changed = true;
         }
 
-        // 仅鼠标移动（画面未变）时 LastPresentTime 为 0
-        let copied = if info.LastPresentTime == 0 && !self.first {
+        // 仅鼠标移动（画面未变）时 LastPresentTime 为 0：
+        // 首次采集时若 LastPresentTime == 0，DXGI 表面可能尚未由 DWM 填充（全黑），先等待真正的 Present（最多 1.5s 兜底）
+        let wait_first_present =
+            self.first && self.opened_at.elapsed() < Duration::from_millis(1500);
+        let copied = if info.LastPresentTime == 0 && (!self.first || wait_first_present) {
             Ok(None)
         } else {
             res.take()

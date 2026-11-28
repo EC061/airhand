@@ -68,12 +68,15 @@ class RemoteSession(
     private val app: AirhandApp,
     val code: String,
     resume: String?,
-    /** 只看画面（电视）：不发送任何输入 */
+    /** 只看画面（电视 / 无线副屏）：不发送任何输入 */
     val viewOnly: Boolean,
     /** 之前记下的对方公钥（我的设备）：只认它，对不上是 hostKeyChanged。null：第一次连 */
     hostKey: String? = null,
     /** 配对码（对方要求配对、或者对方的身份变了要重新配对时用户输入的），只用于这一次连接 */
     pairing: String? = null,
+    /** 无线副屏模式：直接建立并显示对方的扩展虚拟显示器，不进远程控制界面、不显示虚拟鼠标、由对方把真实鼠标画进画面 */
+    val monitorMode: Boolean = false,
+    initialExtend: VirtualDisplaySpec? = null,
 ) {
     sealed interface Phase {
         data object Connecting : Phase
@@ -104,8 +107,10 @@ class RemoteSession(
     /** 被控端的提示，按类别（capture / audio / permissions / other）各保留一条 */
     val notices = MutableStateFlow<Map<String, Notice>>(emptyMap())
     val videoSize = MutableStateFlow<Pair<Int, Int>?>(null)
+    /** 本次画面是否已经真正解码并渲染到 Surface 上（用于避免黑屏阶段过早隐藏加载提示） */
+    val frameRendered = MutableStateFlow(false)
     val cursor = MutableStateFlow(CursorState())
-    val audioOn = MutableStateFlow(app.settings.value.audio)
+    val audioOn = MutableStateFlow(if (monitorMode) false else app.settings.value.audio)
     val avSyncOn = MutableStateFlow(app.settings.value.avSync)
 
     /** 锁定鼠标：鼠标一直只发移动了多少、不发位置（被控端隐藏光标时会自动这样，这是手动打开的） */
@@ -145,18 +150,18 @@ class RemoteSession(
     val extendDetail = MutableStateFlow<String?>(null)
 
     /** 本会话选择的扩展副屏规格 */
-    val extendSpec = MutableStateFlow(VirtualDisplaySpec(1920, 1200))
+    val extendSpec = MutableStateFlow(initialExtend ?: VirtualDisplaySpec(1920, 1200))
 
     /** 本会话是否已按屏幕尺寸初始化过一次默认扩展副屏规格（避免每次重开菜单覆盖用户的选择） */
-    private var extendSpecSeeded = false
+    private var extendSpecSeeded = initialExtend != null
 
     /** 期望的扩展副屏规格：重连时在连接选项里带上，断线重连后保持副屏 */
     @Volatile
-    private var extendWanted: VirtualDisplaySpec? = null
+    private var extendWanted: VirtualDisplaySpec? = initialExtend
     val quality = MutableStateFlow(
-        Preset.of(app.settings.value.preset).quality(
+        (if (monitorMode) Preset.NATIVE else Preset.of(app.settings.value.preset)).quality(
             VideoDecoder.decodable.firstOrNull { it in Codec.PRIORITY } ?: Codec.H264,
-        ),
+        ).copy(drawCursor = monitorMode),
     )
 
     private val _clipboard = MutableSharedFlow<String>(extraBufferCapacity = 4)
@@ -205,6 +210,10 @@ class RemoteSession(
         requestKeyframe = { command { Commands.keyframe(it) } },
         onTooLarge = { c, w, h -> onTooLarge(c, w, h) },
         onStats = { decoderStats.value = it },
+        onRendered = { w, h ->
+            if (videoSize.value != w to h) videoSize.value = w to h
+            frameRendered.value = true
+        },
     )
 
     /** 收到过本机解码器放不下的画面：按画面尺寸算出的短边上限（只对那种格式有效；对方换了屏幕 / 转了屏就作废） */
@@ -291,6 +300,7 @@ class RemoteSession(
                     onConnected(h, ok)
                     val end = pump(h, ok.getInt("sid")) ?: break
                     sid = -1
+                    frameRendered.value = false
                     resetPrivacy()
                     decoder.resetStream()
                     stats.value = null
@@ -507,8 +517,13 @@ class RemoteSession(
                 e.optInt("height"),
             )
             "displays" -> {
+                val prev = currentDisplay.value
                 displays.value = DisplayInfo.parseList(e.optJSONArray("displays"))
                 currentDisplay.value = e.optInt("current")
+                if (monitorMode && currentDisplay.value != prev) {
+                    frameRendered.value = false
+                    decoder.resetStream()
+                }
                 // 转了屏 / 换了屏幕：按新的尺寸重新算解码器放不放得下
                 frameLimit = null
                 refreshSettings()
@@ -610,7 +625,7 @@ class RemoteSession(
     }
 
     private fun currentSettings(): Quality {
-        val q = quality.value.let { it.copy(maxShort = decodableMaxShort(it)) }
+        val q = quality.value.let { it.copy(maxShort = decodableMaxShort(it), drawCursor = monitorMode) }
         return if (background) q.copy(fps = BACKGROUND_FPS) else q
     }
 
@@ -756,7 +771,7 @@ class RemoteSession(
      * 开启成功后会自动切换到这块副屏。spec 为 null 时关闭虚拟副屏
      */
     fun setExtend(spec: VirtualDisplaySpec?) {
-        if (viewOnly) return
+        if (viewOnly && !monitorMode) return
         val s = extendState.value
         if (s != null && !s.usable) return
         if (spec != null) {

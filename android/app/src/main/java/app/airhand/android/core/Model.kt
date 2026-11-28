@@ -27,6 +27,7 @@ data class Quality(
     val maxShort: Int,
     val adaptive: Boolean = true,
     val codec: Codec = Codec.H264,
+    val drawCursor: Boolean = false,
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("fps", fps)
@@ -34,6 +35,7 @@ data class Quality(
         .put("maxShort", maxShort)
         .put("adaptive", adaptive)
         .put("codec", codec.wire)
+        .apply { if (drawCursor) put("drawCursor", true) }
 }
 
 /** 画质预设：与桌面控制台（client/src/lib/presets.ts）相同 */

@@ -96,7 +96,8 @@ class SessionActivity : ComponentActivity(), RemoteView.Host {
             return
         }
         session = s
-        val tv = s.viewOnly || AirhandApp.isTv(this)
+        val monitor = s.monitorMode
+        val tv = !monitor && (s.viewOnly || AirhandApp.isTv(this))
         volumeControlStream = AudioManager.STREAM_MUSIC
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -108,8 +109,8 @@ class SessionActivity : ComponentActivity(), RemoteView.Host {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
         view = RemoteView(this, this).apply {
-            interactive = !tv
-            if (tv) {
+            interactive = !(tv || monitor)
+            if (tv || monitor) {
                 isFocusable = false
                 isFocusableInTouchMode = false
                 showCursor = false
@@ -145,10 +146,10 @@ class SessionActivity : ComponentActivity(), RemoteView.Host {
         }
         setContent {
             AirhandTheme(dark = true) {
-                if (tv) {
-                    TvSession(s, view, onExit = ::exit)
-                } else {
-                    PhoneSession(s, view, keyboard, keyboardOpen, landscape.value, onRotate = ::rotate, onExit = ::exit)
+                when {
+                    monitor -> MonitorSession(s, view, landscape.value, onRotate = ::rotate, onExit = ::exit)
+                    tv -> TvSession(s, view, onExit = ::exit)
+                    else -> PhoneSession(s, view, keyboard, keyboardOpen, landscape.value, onRotate = ::rotate, onExit = ::exit)
                 }
             }
         }
@@ -261,6 +262,7 @@ fun SessionStatus(session: RemoteSession, big: Boolean, onExit: () -> Unit): Boo
     val ctx = LocalContext.current
     val phase by session.phase.collectAsState()
     val video by session.videoSize.collectAsState()
+    val rendered by session.frameRendered.collectAsState()
     val name by session.hostName.collectAsState()
     val who = name.ifBlank { Code.format(session.code) }
     LaunchedEffect(phase) { if (phase is RemoteSession.Phase.Closed) onExit() }
@@ -269,7 +271,7 @@ fun SessionStatus(session: RemoteSession, big: Boolean, onExit: () -> Unit): Boo
 
     val st: St? = when (val p = phase) {
         RemoteSession.Phase.Connecting -> St(true, ctx.getString(R.string.session_connecting, who), null, false, false, true)
-        RemoteSession.Phase.Live -> if (video == null) St(true, ctx.getString(R.string.session_waiting_video), null, false, false, false) else null
+        RemoteSession.Phase.Live -> if (!session.monitorMode && (video == null || !rendered)) St(true, ctx.getString(R.string.session_waiting_video), null, false, false, false) else null
         is RemoteSession.Phase.Reconnecting -> St(true, ctx.getString(R.string.session_reconnecting), Messages.problem(ctx, p.reason), false, false, true)
         is RemoteSession.Phase.WaitingHost -> St(true, ctx.getString(R.string.session_waiting_host, who), ctx.getString(R.string.session_waiting_host_detail), true, false, true)
         is RemoteSession.Phase.Ended -> St(false, ctx.getString(R.string.session_ended), Messages.problem(ctx, p.reason), true, true, true)

@@ -458,6 +458,9 @@ impl Desktop {
         let moved = self.apply_view(next).await;
         if moved {
             self.out.send(&self.displays_msg())?;
+        } else if let Some(Some(p)) = self.pipelines.first() {
+            // 已经在看这块副屏（例如副屏刚改完分辨率）：马上补一个关键帧
+            p.request_keyframe(None);
         }
         Ok(())
     }
@@ -652,7 +655,12 @@ impl Platform for Desktop {
             displays = wait_for_displays(WAKE_WAIT).await;
         }
         self.displays = displays;
-        let view = resolve_view(&start.view, self.displays.len(), MAX_STREAMS);
+        // 若控制端在握手里直接请求了扩展副屏（无线副屏模式），先不采集主显示器画面：等确认握手并建好副屏后再直接采集副屏
+        let view = if start.extend.is_some() {
+            Vec::new()
+        } else {
+            resolve_view(&start.view, self.displays.len(), MAX_STREAMS)
+        };
         let (hostname, os) = crate::sysinfo::host_identity();
         info!(
             session_id = self.session_id,
@@ -716,6 +724,8 @@ impl Platform for Desktop {
         if let Some(spec) = self.extend_at_start.take() {
             self.extend_auto_switch = true;
             self.screens.set_extend(Some(spec));
+            // 即使副屏已在 linger 期间处于 On（watch 值未变），也立即唤醒 Tick::Extend 切到副屏
+            self.extend_changes.mark_changed();
         }
         #[cfg(target_os = "macos")]
         {
@@ -868,7 +878,12 @@ impl Platform for Desktop {
                 .unwrap_or_default();
                 // 列不出来（例如切换显示模式的瞬间）时保留原来的列表
                 if !now.is_empty() && now != self.displays {
-                    let mut next = follow_view(&self.displays, &self.view, &now, fill_in.as_deref());
+                    let mut next = if self.extend_auto_switch && self.view.is_empty() {
+                        // 无线副屏模式正在等待副屏就绪：不要在等待间隙把主显示器画面推给控制端
+                        Vec::new()
+                    } else {
+                        follow_view(&self.displays, &self.view, &now, fill_in.as_deref())
+                    };
                     if self.extend_auto_switch
                         && let Some(status) = self.screens.extend()
                         && status.state == ExtendState::On

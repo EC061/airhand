@@ -532,4 +532,15 @@
     <string name="tv_scale_fit">完整显示</string>
     <string name="tv_scale_fill">铺满（裁掉边缘）</string>
     <string name="tv_scale_stretch">拉伸全屏</string>
+
+    <!-- 无线副屏模式 -->
+    <string name="connect_second_monitor">作为副屏</string>
+    <string name="monitor_active">无线副屏 · 点击返回</string>
+    <string name="monitor_settings">副屏设置</string>
+    <string name="monitor_display_options">显示与声音</string>
+    <string name="monitor_setting_up">正在创建无线副屏（%1$d×%2$d）…</string>
+    <string name="monitor_setting_up_hint">正在等待对方电脑挂载虚拟显示器并输出首帧画面</string>
+    <string name="monitor_unavailable_title">无法使用无线副屏</string>
+    <string name="monitor_stopped">对方电脑已关闭扩展虚拟副屏</string>
+    <string name="monitor_disconnect_text">断开与“%1$s”的无线副屏并移除虚拟显示器？</string>
 </resources>

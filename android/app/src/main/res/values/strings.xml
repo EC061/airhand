@@ -539,4 +539,15 @@
     <string name="tv_scale_fit">Fit</string>
     <string name="tv_scale_fill">Fill (crop edges)</string>
     <string name="tv_scale_stretch">Stretch</string>
+
+    <!-- Second monitor mode -->
+    <string name="connect_second_monitor">Second monitor</string>
+    <string name="monitor_active">Second monitor · tap to return</string>
+    <string name="monitor_settings">Monitor settings</string>
+    <string name="monitor_display_options">Display &amp; audio</string>
+    <string name="monitor_setting_up">Setting up second monitor (%1$d×%2$d)…</string>
+    <string name="monitor_setting_up_hint">Waiting for the remote computer to attach the virtual display and draw its first frame</string>
+    <string name="monitor_unavailable_title">Second monitor unavailable</string>
+    <string name="monitor_stopped">The extended virtual display was turned off on the remote computer</string>
+    <string name="monitor_disconnect_text">Disconnect this second monitor from “%1$s” and remove the virtual display?</string>
 </resources>
